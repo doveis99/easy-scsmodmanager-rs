@@ -203,8 +203,8 @@ pub fn hash_path(path: &str, salt: u16) -> u64 {
 mod tests {
     use super::*;
 
-    // Expected values generated with the Python reference implementation
-    // (easy_scsmodmanager/integrations/scs/cityhash.py), one per length class.
+    // Expected values generated with the original app's Python
+    // implementation of the hash, one per length class.
     include!("cityhash_vectors.in");
 
     #[test]

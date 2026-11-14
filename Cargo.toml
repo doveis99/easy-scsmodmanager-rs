@@ -12,3 +12,11 @@ repository = "https://github.com/doveis99/easy-scsmodmanager-rs"
 opt-level = 3
 lto = "thin"
 strip = true
+
+# Test and check builds: keep line numbers for our own crates, no debug info
+# for dependencies. The full debug info of the GUI stack is several GB.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
