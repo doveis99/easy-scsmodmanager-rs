@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 // ---------------------------------------------------------------- types
 
 type GameId = "ets2" | "ats";
+type Compat = "compatible" | "incompatible" | "unspecified" | "unknown_game_version";
 
 interface InstallInfo {
   game: GameId;
@@ -31,6 +32,7 @@ interface Mod {
   installed_at: number;
   description: string | null;
   compatible_versions: string[];
+  compat: Compat;
   has_icon: boolean;
 }
 
@@ -46,6 +48,7 @@ interface ActiveItem {
   display_name: string;
   token: string;
   installed: boolean;
+  compat: Compat;
 }
 
 type Row =
@@ -55,6 +58,19 @@ type Row =
 interface Layout {
   rows: Row[];
   misplaced: number;
+}
+
+interface ModOverride {
+  severity: "partial" | "full";
+  lost: { file: string; winner: string }[];
+  shared_total: number;
+}
+
+interface ConflictReport {
+  /** Mods that lose def files to a mod above them, keyed by active name. */
+  overrides: Record<string, ModOverride>;
+  /** Files shared by so many mods that the overlap is normal, not a conflict. */
+  frequent: Record<string, { file: string; owners: number }[]>;
 }
 
 interface Constants {
@@ -116,6 +132,7 @@ const state = {
   /** JSON of the list as last loaded/saved - the dirty check. */
   saved: "[]",
   layout: { rows: [], misplaced: 0 } as Layout,
+  conflicts: { overrides: {}, frequent: {} } as ConflictReport,
   filter: { q: "", category: "", source: "", sort: "name" },
   /** Bumped per load so a slow response for an old game/profile is dropped. */
   epoch: 0,
@@ -168,12 +185,25 @@ function errorText(e: unknown): string {
 }
 
 function confirmModal(title: string, body: string, okLabel: string): Promise<boolean> {
+  return openModal(title, body, okLabel, false);
+}
+
+/** A read-only report: preformatted, selectable text and a single button. */
+function infoModal(title: string, body: string): Promise<boolean> {
+  return openModal(title, body, "닫기", true);
+}
+
+function openModal(title: string, body: string, okLabel: string, info: boolean): Promise<boolean> {
   return new Promise((resolve) => {
     const modal = $("modal");
     $("modal-title").textContent = title;
-    $("modal-body").textContent = body;
+    const bodyEl = $("modal-body");
+    bodyEl.textContent = body;
+    bodyEl.classList.toggle("pre", info);
+    modal.classList.toggle("wide", info);
     const ok = $<HTMLButtonElement>("modal-ok");
     const cancel = $<HTMLButtonElement>("modal-cancel");
+    cancel.hidden = info;
     ok.textContent = okLabel;
     const close = (answer: boolean) => {
       modal.hidden = true;
@@ -206,6 +236,7 @@ async function loadGame(game: GameId) {
   state.profilePath = "";
   // the old layout indexes into the list that was just cleared
   state.layout = { rows: [], misplaced: 0 };
+  state.conflicts = { overrides: {}, frequent: {} };
   renderGameSwitch();
   renderProfileSelect();
   renderAll();
@@ -258,15 +289,105 @@ async function loadProfile() {
   await relayout();
 }
 
-/** Recompute group headers for the current list and redraw everything. */
+/** The list as the backend wants it: identity only, display order. */
+function activeEntries(items: ActiveItem[] = state.active) {
+  return items.map(({ name, display_name }) => ({ name, display_name }));
+}
+
+/** Recompute group headers and conflicts for the current list and redraw. */
 async function relayout() {
   const epoch = state.epoch;
-  const layout = await invoke<Layout>("layout_rows", {
-    tokens: state.active.map((a) => a.token),
-  });
+  const [layout, conflicts] = await Promise.all([
+    invoke<Layout>("layout_rows", { tokens: state.active.map((a) => a.token) }),
+    invoke<ConflictReport>("analyze_conflicts", { game: state.game, items: activeEntries() }),
+  ]);
   if (epoch !== state.epoch) return;
   state.layout = layout;
+  state.conflicts = conflicts;
   renderAll();
+}
+
+// ------------------------------------------------------------ conflicts
+
+const GLYPH = { full: "⊘", partial: "⚠", frequent: "=" } as const;
+
+function displayNameOf(name: string): string {
+  return state.active.find((a) => a.name === name)?.display_name || name;
+}
+
+function gameVersion(): string | null {
+  return state.installs.find((i) => i.game === state.game)?.version ?? null;
+}
+
+/** What one mod loses and shares, as text. `limit` caps each list (tooltips). */
+function conflictLines(name: string, limit?: number): string[] {
+  const lines: string[] = [];
+  const more = (rest: number) => {
+    if (rest > 0) lines.push(`  … 외 ${rest}개`);
+  };
+  const override = state.conflicts.overrides[name];
+  if (override) {
+    lines.push(
+      override.severity === "full"
+        ? `겹치는 def 파일 ${override.shared_total}개가 모두 위쪽 모드에 덮어써집니다.`
+        : `겹치는 def 파일 ${override.shared_total}개 중 ${override.lost.length}개가 위쪽 모드에 덮어써집니다.`,
+    );
+    const shown = limit === undefined ? override.lost : override.lost.slice(0, limit);
+    for (const l of shown) lines.push(`  ${l.file} → ${displayNameOf(l.winner)}`);
+    more(override.lost.length - shown.length);
+  }
+  const frequent = state.conflicts.frequent[name];
+  if (frequent) {
+    lines.push(
+      override
+        ? "여러 모드가 흔히 함께 수정하는 파일도 있습니다 (충돌 아님)."
+        : "여러 모드가 흔히 함께 수정하는 파일입니다 (충돌 아님).",
+    );
+    const shown = limit === undefined ? frequent : frequent.slice(0, limit);
+    for (const f of shown) lines.push(`  ${f.file} (모드 ${f.owners}개)`);
+    more(frequent.length - shown.length);
+  }
+  return lines;
+}
+
+/** The whole report, one block per affected mod, in load order. */
+function conflictReport(): string {
+  const affected = state.active.filter(
+    (a) => state.conflicts.overrides[a.name] || state.conflicts.frequent[a.name],
+  );
+  const profile = state.profiles.find((p) => p.path === state.profilePath)?.profile_name ?? "";
+  const version = gameVersion();
+  const head = [
+    `게임: ${state.game.toUpperCase()}${version ? ` ${version}` : ""}   프로필: ${profile}`,
+    `덮어써지는 모드 ${Object.keys(state.conflicts.overrides).length}개`,
+    "아래쪽 모드의 파일이 위쪽 모드에 가려진다는 안내이며 오류가 아닙니다. 맵 모드에서는 의도된 경우가 많습니다.",
+    "=".repeat(44),
+  ];
+  const blocks = affected.map((a) => [a.display_name || a.name, ...conflictLines(a.name)].join("\n"));
+  return [head.join("\n"), ...blocks].join("\n\n");
+}
+
+function conflictGlyph(item: ActiveItem): HTMLElement | null {
+  const override = state.conflicts.overrides[item.name];
+  const frequent = state.conflicts.frequent[item.name];
+  if (!override && !frequent) return null;
+  const kind = override ? override.severity : "frequent";
+  const label = { full: "전부 덮어써짐", partial: "일부 덮어써짐", frequent: "흔히 공유되는 파일" }[kind];
+  return h(
+    "button",
+    {
+      class: `glyph ${kind}`,
+      title: [label, ...conflictLines(item.name, 8)].join("\n"),
+      "aria-label": label,
+      onclick: () => void infoModal(item.display_name || item.name, conflictLines(item.name).join("\n")),
+    },
+    GLYPH[kind],
+  );
+}
+
+function compatTitle(versions: string[]): string {
+  const game = gameVersion();
+  return `이 모드가 선언한 호환 버전: ${versions.join(", ")}` + (game ? `\n현재 게임 버전: ${game}` : "");
 }
 
 // ------------------------------------------------------------ rendering
@@ -443,6 +564,9 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
           h("span", { class: "badge cat" + (m.category_override ? " pinned" : "") }, catLabel(c)),
         ),
         h("span", { class: "badge src" }, m.source === "workshop" ? "창작마당" : "로컬"),
+        m.compat === "incompatible"
+          ? h("span", { class: "badge err", title: compatTitle(m.compatible_versions) }, "버전 불일치")
+          : null,
         m.error ? h("span", { class: "badge err", title: m.error }, "읽기 실패") : null,
       ),
     ),
@@ -467,8 +591,15 @@ function renderOrder() {
   const { rows, misplaced } = state.layout;
   const dirty = isDirty();
 
+  const overridden = Object.keys(state.conflicts.overrides).length;
+  const incompatible = state.active.filter((a) => a.compat === "incompatible").length;
   $("order-summary").textContent =
-    `활성 ${state.active.length}개` + (misplaced ? ` · 그룹에 맞지 않는 모드 ${misplaced}개` : "");
+    `활성 ${state.active.length}개` +
+    (misplaced ? ` · 그룹에 맞지 않는 모드 ${misplaced}개` : "") +
+    (overridden ? ` · 덮어써지는 모드 ${overridden}개` : "") +
+    (incompatible ? ` · 버전 불일치 ${incompatible}개` : "");
+  $("show-conflicts").hidden =
+    overridden === 0 && Object.keys(state.conflicts.frequent).length === 0;
   $<HTMLButtonElement>("auto-sort").disabled = misplaced === 0;
   $<HTMLButtonElement>("revert").disabled = !dirty;
   $<HTMLButtonElement>("save").disabled = !dirty || !state.profilePath;
@@ -524,6 +655,17 @@ function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLEle
       ? h("span", { class: "badge warn" }, `→ ${groupLabel(row.expected_group_id)}`)
       : null,
     item.installed ? null : h("span", { class: "badge err" }, "미설치"),
+    item.compat === "incompatible"
+      ? h(
+          "span",
+          {
+            class: "badge err",
+            title: compatTitle(state.mods.find((m) => m.id === item.name)?.compatible_versions ?? []),
+          },
+          "버전 불일치",
+        )
+      : null,
+    conflictGlyph(item),
     h(
       "button",
       { class: "icon-btn", title: "비활성화", "aria-label": "비활성화", onclick: () => void removeActive(item.name) },
@@ -542,6 +684,7 @@ async function addActive(m: Mod) {
     display_name: m.display_name,
     token: m.group_token,
     installed: true,
+    compat: m.compat,
   });
   await relayout();
 }
@@ -588,7 +731,7 @@ async function save() {
     const backup = await invoke<string>("save_load_order", {
       game: state.game,
       profilePath: state.profilePath,
-      items: state.active,
+      items: activeEntries(),
     });
     state.saved = JSON.stringify(state.active);
     const profile = state.profiles.find((p) => p.path === state.profilePath);
@@ -608,10 +751,7 @@ async function setOverride(m: Mod, token: string | null) {
     state.mods = await invoke<Mod[]>("scan_mods", { game: state.game });
     const savedItems = JSON.parse(state.saved) as ActiveItem[];
     const resolveItems = (items: ActiveItem[]) =>
-      invoke<ActiveItem[]>("resolve_items", {
-        game: state.game,
-        items: items.map(({ name, display_name }) => ({ name, display_name })),
-      });
+      invoke<ActiveItem[]>("resolve_items", { game: state.game, items: activeEntries(items) });
     const [active, saved] = await Promise.all([resolveItems(state.active), resolveItems(savedItems)]);
     state.active = active;
     state.saved = JSON.stringify(saved);
@@ -764,6 +904,7 @@ function bindControls() {
     await loadGame(state.game);
   });
   $("auto-sort").addEventListener("click", () => void autoSort());
+  $("show-conflicts").addEventListener("click", () => void infoModal("def 파일 충돌", conflictReport()));
   $("revert").addEventListener("click", () => void revert());
   $("save").addEventListener("click", () => void save());
 }

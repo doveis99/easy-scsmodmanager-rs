@@ -8,6 +8,8 @@
 //! GPL-3.0-or-later).
 
 pub mod categories;
+pub mod compat;
+pub mod conflicts;
 pub mod game;
 pub mod identity;
 pub mod load_order;

@@ -10,10 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::State;
 
 use scsmm_core::categories::{is_official, OFFICIAL_CATEGORIES};
+use scsmm_core::compat::{compat_status, CompatStatus};
+use scsmm_core::conflicts::{self, ConflictReport};
 use scsmm_core::game::{self, Game, GameInstall};
 use scsmm_core::identity::{workshop_url, ActiveModMatcher};
 use scsmm_core::load_order::{self, Row, DEFAULT_MAP_BASE_NAMES, GROUPS, MAP_BASE};
@@ -33,6 +35,8 @@ struct AppState {
 struct Inner {
     /// Last scan per game.
     scans: HashMap<Game, Vec<ScannedMod>>,
+    /// Game version read at the last scan, per game.
+    versions: HashMap<Game, Option<String>>,
     /// mod name -> category token, per game. Loaded lazily from disk.
     overrides: Option<HashMap<String, HashMap<String, String>>>,
 }
@@ -117,6 +121,8 @@ struct ModDto {
     installed_at: f64,
     description: Option<String>,
     compatible_versions: Vec<String>,
+    /// The game's own verdict from `compatible_versions[]`.
+    compat: CompatStatus,
     has_icon: bool,
 }
 
@@ -128,13 +134,14 @@ struct ProfileDto {
     error: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize)]
 struct ActiveItem {
     name: String,
     display_name: String,
     /// Load-order group token.
     token: String,
     installed: bool,
+    compat: CompatStatus,
 }
 
 #[derive(Serialize)]
@@ -157,7 +164,12 @@ fn group_token(name: &str, display_name: &str, category: &str) -> String {
     }
 }
 
-fn mod_dto(m: &ScannedMod, display_name: String, category_override: Option<String>) -> ModDto {
+fn mod_dto(
+    m: &ScannedMod,
+    display_name: String,
+    category_override: Option<String>,
+    game_version: Option<&str>,
+) -> ModDto {
     let id = m.mod_name();
     let categories = m.effective_categories(category_override.as_deref());
     let manifest = m.manifest.clone().unwrap_or_default();
@@ -183,6 +195,7 @@ fn mod_dto(m: &ScannedMod, display_name: String, category_override: Option<Strin
         error: m.error.clone(),
         installed_at: m.installed_at,
         description: m.description.clone(),
+        compat: compat_status(game_version, &manifest.compatible_versions),
         compatible_versions: manifest.compatible_versions,
         has_icon: m.icon.as_deref().and_then(sniff_image_mime).is_some(),
         id,
@@ -248,10 +261,11 @@ fn scan_mods(game: String, state: State<'_, AppState>) -> CmdResult<Vec<ModDto>>
                 Some(name) if !has_name => name.clone(),
                 _ => m.display_name(),
             };
-            mod_dto(m, display, inner.override_for(game, &id))
+            mod_dto(m, display, inner.override_for(game, &id), version.as_deref())
         })
         .collect();
     inner.scans.insert(game, mods);
+    inner.versions.insert(game, version);
     Ok(dtos)
 }
 
@@ -311,6 +325,7 @@ fn known_profile(game: Game, profile_path: &str) -> CmdResult<PathBuf> {
 fn resolve(inner: &mut Inner, game: Game, entries: &[ActiveMod]) -> Vec<ActiveItem> {
     let scanned = inner.scans.get(&game).cloned().unwrap_or_default();
     let matcher = ActiveModMatcher::new(&scanned);
+    let version = inner.versions.get(&game).cloned().flatten();
     entries
         .iter()
         .map(|a| {
@@ -322,7 +337,12 @@ fn resolve(inner: &mut Inner, game: Game, entries: &[ActiveMod]) -> Vec<ActiveIt
                 }
                 None => "other".to_string(),
             };
+            let compat = match hit.and_then(|m| m.manifest.as_ref()) {
+                Some(mf) => compat_status(version.as_deref(), &mf.compatible_versions),
+                None => CompatStatus::Unspecified,
+            };
             ActiveItem {
+                compat,
                 token: group_token(&a.name, &a.display_name, &category),
                 name: a.name.clone(),
                 display_name: a.display_name.clone(),
@@ -352,6 +372,26 @@ fn resolve_items(game: String, items: Vec<ActiveMod>, state: State<'_, AppState>
     Ok(resolve(&mut inner, game, &items))
 }
 
+/// Which active mods (display order, top first) lose `def/` files to a
+/// mod above them, and which files are shared too widely to matter.
+#[tauri::command]
+fn analyze_conflicts(game: String, items: Vec<ActiveMod>, state: State<'_, AppState>) -> CmdResult<ConflictReport> {
+    let game = parse_game(&game)?;
+    let inner = state.inner.lock().map_err(|e| e.to_string())?;
+    let empty = Vec::new();
+    let scanned = inner.scans.get(&game).unwrap_or(&empty);
+    let matcher = ActiveModMatcher::new(scanned);
+    // an active entry that is not installed has no files to compare
+    let active: Vec<(&str, &[String])> = items
+        .iter()
+        .filter_map(|a| {
+            let m = &scanned[matcher.lookup(a)?];
+            Some((a.name.as_str(), m.def_files.as_slice()))
+        })
+        .collect();
+    Ok(conflicts::analyze(&active))
+}
+
 /// Group headers and misplacement flags for tokens in display order.
 #[tauri::command]
 fn layout_rows(tokens: Vec<String>) -> Layout {
@@ -370,17 +410,10 @@ fn auto_sort(tokens: Vec<String>) -> Vec<usize> {
 /// Write the list (display order) to profile.sii after backing the whole
 /// profile directory up. Returns the backup path.
 #[tauri::command(async)]
-fn save_load_order(game: String, profile_path: String, items: Vec<ActiveItem>) -> CmdResult<String> {
+fn save_load_order(game: String, profile_path: String, items: Vec<ActiveMod>) -> CmdResult<String> {
     let sii = known_profile(parse_game(&game)?, &profile_path)?;
     // file order is the reverse of display order: index 0 = bottom
-    let mods: Vec<ActiveMod> = items
-        .into_iter()
-        .rev()
-        .map(|i| ActiveMod {
-            name: i.name,
-            display_name: i.display_name,
-        })
-        .collect();
+    let mods: Vec<ActiveMod> = items.into_iter().rev().collect();
     let backup = profile::save_active_mods(&sii, &mods, &profile::default_backup_root())
         .map_err(|e| e.to_string())?;
     Ok(backup.path.display().to_string())
@@ -420,6 +453,7 @@ pub fn run() {
             list_profiles,
             read_load_order,
             resolve_items,
+            analyze_conflicts,
             layout_rows,
             auto_sort,
             save_load_order,

@@ -400,6 +400,32 @@ input[type="search"] {
   white-space: nowrap;
 }
 
+.glyph {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 15px;
+  line-height: 1;
+  border-radius: 4px;
+}
+
+.glyph:hover {
+  background: var(--bg);
+}
+
+.glyph.full {
+  color: var(--err);
+}
+
+.glyph.partial {
+  color: var(--warn);
+}
+
+.glyph.frequent {
+  color: var(--muted);
+}
+
 .icon-btn {
   border: 0;
   background: transparent;
@@ -464,6 +490,21 @@ input[type="search"] {
   margin: 0 0 18px;
   line-height: 1.55;
   color: var(--muted);
+}
+
+.modal-backdrop.wide .modal {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.modal p.pre {
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text);
+  user-select: text;
 }
 
 .modal-actions {
