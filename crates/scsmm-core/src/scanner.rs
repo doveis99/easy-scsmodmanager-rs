@@ -19,6 +19,7 @@ use serde::Serialize;
 
 use crate::categories::{contains_map, content_category, effective_categories};
 use crate::game::GameInstall;
+use crate::gamepaths::GamePaths;
 use crate::identity::{mod_name_for_path, workshop_id_for_path};
 use crate::manifest::{read_bundle, ManifestBundle, ModManifest, MANIFEST_ENTRY};
 use crate::scs::aem::AemSource;
@@ -49,6 +50,13 @@ pub struct ScannedMod {
     /// load order matters. Shared, because scans are cloned around.
     #[serde(skip)]
     pub file_hashes: Arc<[u64]>,
+    /// Hashes of the files the archive holds without listing them - a
+    /// "locked" archive. Empty for everything that lists its files.
+    #[serde(skip)]
+    pub hidden: Arc<[u64]>,
+    /// How many of the hidden files could be named after all (they share
+    /// a path with a file of the game or of another mod).
+    pub hidden_named: usize,
     /// When the payload landed on this filesystem (seconds since the Unix
     /// epoch; creation time where available). 0 when unreadable.
     pub installed_at: f64,
@@ -78,8 +86,9 @@ impl ScannedMod {
         }
     }
 
-    /// Category the content proves, falling back to the manifest.
-    pub fn effective_categories(&self, override_token: Option<&str>) -> Vec<String> {
+    /// Categories: the user's pins (main one first), else what the
+    /// content proves, else the manifest.
+    pub fn effective_categories(&self, pins: &[String]) -> Vec<String> {
         let manifest_cats = self
             .manifest
             .as_ref()
@@ -88,7 +97,7 @@ impl ScannedMod {
         effective_categories(
             manifest_cats,
             self.is_map,
-            override_token,
+            pins,
             content_category(&self.def_files),
         )
     }
@@ -103,6 +112,8 @@ impl ScannedMod {
             is_map: false,
             def_files: Vec::new(),
             file_hashes: Arc::from([]),
+            hidden: Arc::from([]),
+            hidden_named: 0,
             installed_at: 0.0,
             icon: None,
         }
@@ -129,28 +140,36 @@ impl ScannedMod {
 ///
 /// `owned_dlc` gates the 1.48 `dlc_<name>/` normalisation; `None` means the
 /// game directory was not found, so those folders are ungated.
+/// `game_paths` (the paths of the game's own files) lets locked archives
+/// be seen for what they replace; without it they are only compared with
+/// the other mods.
 pub fn scan_game_install(
     install: &GameInstall,
     game_version: Option<&str>,
     owned_dlc: Option<&BTreeSet<String>>,
+    game_paths: Option<&mut GamePaths>,
 ) -> Vec<ScannedMod> {
     let mut payloads = mod_candidates(&install.mod_dir());
     if let Some(ws) = &install.workshop_dir {
         payloads.extend(workshop_payloads(ws, game_version));
     }
-    scan_paths(&payloads, owned_dlc)
+    scan_paths(&payloads, owned_dlc, game_paths)
 }
 
 pub fn scan_mod_directory(directory: &Path, owned_dlc: Option<&BTreeSet<String>>) -> Vec<ScannedMod> {
-    scan_paths(&mod_candidates(directory), owned_dlc)
+    scan_paths(&mod_candidates(directory), owned_dlc, None)
 }
 
-fn scan_paths(paths: &[PathBuf], owned_dlc: Option<&BTreeSet<String>>) -> Vec<ScannedMod> {
+fn scan_paths(
+    paths: &[PathBuf],
+    owned_dlc: Option<&BTreeSet<String>>,
+    game_paths: Option<&mut GamePaths>,
+) -> Vec<ScannedMod> {
     let mut mods: Vec<ScannedMod> = paths
         .par_iter()
         .map(|p| scan_one(p, owned_dlc))
         .collect();
-    name_hidden_files(&mut mods);
+    name_hidden_files(&mut mods, game_paths);
     mods
 }
 
@@ -162,34 +181,41 @@ const PROBED_MAPS: &[&str] = &["map/europe.mbd", "map/usa.mbd"];
 ///
 /// A "locked" HashFS archive has its directory listings stripped: its
 /// files are there (and in the fingerprint, by hash) but nameless. A path
-/// that any other mod lists, or one of the few standard ones, can still be
-/// tested against the fingerprint - so the def files such an archive
-/// shares with the rest become visible to conflict detection, and a map or
-/// physics mod is recognised by content again.
-fn name_hidden_files(mods: &mut [ScannedMod]) {
+/// that the game itself has (`game_paths`), that any other mod lists, or
+/// one of the few standard ones can still be tested against those hashes -
+/// so the def files such an archive replaces become visible to conflict
+/// detection, and a map or physics mod is recognised by content again.
+fn name_hidden_files(mods: &mut [ScannedMod], mut game_paths: Option<&mut GamePaths>) {
     let mut known: Vec<(u64, String)> = mods
         .iter()
         .flat_map(|m| m.def_files.iter())
         .map(String::as_str)
         .chain(PROBED_DEFS.iter().copied())
+        .chain(PROBED_MAPS.iter().copied())
         .map(|p| (city_hash64(p.as_bytes()), p.to_string()))
         .collect();
     known.sort_unstable();
     known.dedup();
-    let map_hashes: Vec<u64> = PROBED_MAPS.iter().map(|p| city_hash64(p.as_bytes())).collect();
 
-    for m in mods.iter_mut() {
-        let carries = |hash: &u64| m.file_hashes.binary_search(hash).is_ok();
-        let listed: std::collections::HashSet<&str> = m.def_files.iter().map(String::as_str).collect();
-        let hidden: Vec<String> = known
+    for m in mods.iter_mut().filter(|m| !m.hidden.is_empty()) {
+        let names: Vec<String> = m
+            .hidden
             .iter()
-            .filter(|(hash, path)| !listed.contains(path.as_str()) && carries(hash))
-            .map(|(_, path)| path.clone())
+            .filter_map(|hash| {
+                let among_mods = known.binary_search_by_key(hash, |(h, _)| *h).ok().map(|i| known[i].1.clone());
+                among_mods.or_else(|| game_paths.as_deref_mut()?.name_of(*hash))
+            })
             .collect();
-        if !m.is_map && map_hashes.iter().any(carries) {
+        m.hidden_named = names.len();
+        if !m.is_map && contains_map(&names) {
             m.is_map = true;
         }
-        m.def_files.extend(hidden);
+        let listed: std::collections::HashSet<String> = m.def_files.iter().cloned().collect();
+        m.def_files.extend(
+            names
+                .into_iter()
+                .filter(|name| name.starts_with("def/") && !listed.contains(name)),
+        );
     }
 }
 
@@ -285,6 +311,7 @@ struct ListingFacts {
     is_map: bool,
     def_files: Vec<String>,
     file_hashes: Arc<[u64]>,
+    hidden: Arc<[u64]>,
 }
 
 /// Root-level files a mod may carry besides the ones its manifest names.
@@ -337,6 +364,7 @@ fn listing_facts(
         .filter(|p| p.contains('/') && !p.ends_with('/'))
         .map(|p| city_hash64(p.as_bytes()))
         .collect();
+    let mut hidden: Vec<u64> = Vec::new();
     if let Some(table) = table_hashes {
         // the table also holds the root-level files; drop the ones we can
         // name (standard names, the manifest's, and whatever is listed)
@@ -347,14 +375,28 @@ fn listing_facts(
             .chain(files.iter().map(|f| f.trim_start_matches('/')).filter(|f| !f.contains('/')))
             .map(|name| city_hash64(name.as_bytes()))
             .collect();
-        hashes.extend(table.into_iter().filter(|h| !root.contains(h)));
+        // the table stores the paths as the archive spells them, before
+        // the package-layer normalisation above
+        let listed: std::collections::HashSet<u64> = files
+            .iter()
+            .map(|f| city_hash64(f.trim_start_matches('/').as_bytes()))
+            .collect();
+        for hash in table.into_iter().filter(|h| !root.contains(h)) {
+            if !listed.contains(&hash) {
+                hidden.push(hash);
+            }
+            hashes.push(hash);
+        }
     }
     hashes.sort_unstable();
     hashes.dedup();
+    hidden.sort_unstable();
+    hidden.dedup();
     ListingFacts {
         is_map,
         def_files,
         file_hashes: Arc::from(hashes),
+        hidden: Arc::from(hidden),
     }
 }
 
@@ -376,6 +418,8 @@ fn from_bundle(
         is_map: facts.is_map,
         def_files: facts.def_files,
         file_hashes: facts.file_hashes,
+        hidden: facts.hidden,
+        hidden_named: 0,
         installed_at: 0.0,
         icon: bundle.icon,
     }
@@ -611,12 +655,62 @@ mod tests {
         let mut defs = locked.def_files.clone();
         defs.sort();
         assert_eq!(defs, ["def/vehicle/physics.sii", "def/vehicle/truck/x/chassis.sii"]);
-        assert_eq!(locked.effective_categories(None), ["physics"]);
+        assert_eq!(locked.effective_categories(&[]), ["physics"]);
         // a locked map is recognised by its standard descriptor
         assert!(locked_sound.is_map && !locked.is_map);
         // nothing was invented for the ordinary mods
         assert_eq!(patch.def_files, ["def/vehicle/truck/x/chassis.sii"]);
         assert!(other.def_files.is_empty());
+        // what stays hidden is known, and how much of it got a name
+        assert_eq!((locked.hidden.len(), locked.hidden_named), (3, 2));
+        assert_eq!((locked_sound.hidden.len(), locked_sound.hidden_named), (2, 1));
+        assert!(patch.hidden.is_empty() && other.hidden.is_empty());
+    }
+
+    #[test]
+    fn the_games_paths_name_what_no_other_mod_lists() {
+        use crate::scs::hashfs::testutil::build_locked_v1;
+        let tmp = tempfile::tempdir().unwrap();
+        let mod_dir = tmp.path().join("mod");
+        fs::create_dir_all(&mod_dir).unwrap();
+        // two locked archives replacing the same file of the game: neither
+        // lists it, and no other mod does
+        for name in ["a_locked.scs", "b_locked.scs"] {
+            fs::write(
+                mod_dir.join(name),
+                build_locked_v1(
+                    0,
+                    &[
+                        ("manifest.sii", MANIFEST),
+                        ("pic.jpg", JPEG),
+                        ("def/vehicle/truck/x/engine/big.sii", b"."),
+                        ("def/private/only_mine.sii", b"."),
+                        ("map/europe/extra.mbd", b"."),
+                    ],
+                ),
+            )
+            .unwrap();
+        }
+        let payloads = mod_candidates(&mod_dir);
+
+        // without the game's paths the shared file has no name
+        let blind = scan_paths(&payloads, None, None);
+        assert!(blind[0].def_files.is_empty());
+        assert_eq!((blind[0].hidden.len(), blind[0].hidden_named), (3, 0));
+        assert!(blind[0].overlaps(&blind[1]), "the hashes still give the overlap away");
+
+        let mut game = GamePaths::build(
+            ["def/vehicle/truck/x/engine/big.sii", "def/vehicle/truck/x/engine/small.sii", "map/europe.mbd"].into_iter(),
+            "sig",
+            &tmp.path().join("paths.bin"),
+        )
+        .unwrap();
+        let mods = scan_paths(&payloads, None, Some(&mut game));
+        for m in &mods {
+            assert_eq!(m.def_files, ["def/vehicle/truck/x/engine/big.sii"]);
+            assert_eq!((m.hidden.len(), m.hidden_named), (3, 1));
+            assert!(!m.is_map, "a file below map/ is not a map descriptor");
+        }
     }
 
     #[test]
@@ -676,23 +770,23 @@ mod tests {
         assert_eq!(truck.display_name(), "Test Truck");
         assert_eq!(truck.icon.as_deref(), Some(JPEG));
         assert_eq!(truck.description.as_deref(), Some("A fine truck."));
-        assert_eq!(truck.effective_categories(None), ["truck"]);
+        assert_eq!(truck.effective_categories(&[]), ["truck"]);
         assert!(truck.installed_at > 0.0);
 
         let physics = &mods[1];
         assert_eq!(physics.format, ScsFormat::HashfsV1);
-        assert_eq!(physics.effective_categories(None), ["physics"]);
-        assert_eq!(physics.effective_categories(Some("sound")), ["sound"]);
+        assert_eq!(physics.effective_categories(&[]), ["physics"]);
+        assert_eq!(physics.effective_categories(&["sound".to_string()]), ["sound"]);
 
         let map = &mods[2];
         assert_eq!(map.format, ScsFormat::Directory);
         assert!(map.is_map);
-        assert_eq!(map.effective_categories(None), ["map"]);
+        assert_eq!(map.effective_categories(&[]), ["map"]);
 
         let broken = &mods[3];
         assert!(broken.manifest.is_none());
         assert!(broken.error.is_some());
         assert_eq!(broken.display_name(), "d_broken");
-        assert_eq!(broken.effective_categories(None), ["other"]);
+        assert_eq!(broken.effective_categories(&[]), ["other"]);
     }
 }

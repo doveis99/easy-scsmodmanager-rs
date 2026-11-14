@@ -175,6 +175,57 @@ impl HashFsReader {
         (self.entries.len(), dirs, images)
     }
 
+    /// The archive's path salt; 0 means paths are hashed as they are.
+    pub fn salt(&self) -> u16 {
+        self.salt
+    }
+
+    /// The hash under which this archive stores `path`.
+    pub fn hash_of(&self, path: &str) -> u64 {
+        hash_path(path, self.salt)
+    }
+
+    /// Hash and stored size of every file entry (directory listings left
+    /// out), in hash order. Unlike [`iter_files`] this needs no listing, so
+    /// it also covers the files a "locked" archive does not name.
+    ///
+    /// [`iter_files`]: HashFsReader::iter_files
+    pub fn file_entries(&self) -> Vec<(u64, u32)> {
+        let mut out: Vec<(u64, u32)> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| !e.is_directory)
+            .map(|(hash, e)| (*hash, e.size))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// True when the entry stored under `hash` is a v2 packed texture.
+    pub fn is_image_hash(&self, hash: u64) -> bool {
+        self.entries.get(&hash).is_some_and(|e| e.is_image)
+    }
+
+    /// Content of the file stored under `hash` - for entries whose path is
+    /// not known. A packed texture comes back rebuilt as a .dds.
+    pub fn read_by_hash(&mut self, hash: u64) -> Result<Vec<u8>> {
+        let entry = self
+            .entries
+            .get(&hash)
+            .copied()
+            .filter(|e| !e.is_directory)
+            .ok_or_else(|| Error::NotFound(format!("{hash:016x}")))?;
+        if !entry.is_image {
+            return self.content(entry);
+        }
+        let meta = entry
+            .tobj_meta
+            .ok_or_else(|| format_err(format!("texture metadata missing: {hash:016x}")))?;
+        let stored = if entry.is_compressed { entry.compressed_size } else { entry.size };
+        let raw = read_at(&mut self.file, entry.offset, stored as usize)?;
+        reconstruct_dds(&meta, &raw, entry.is_compressed)
+    }
+
     /// True for a v2 packed texture, keyed by its `.tobj` path.
     pub fn is_image_entry(&self, path: &str) -> bool {
         self.entry(path).is_some_and(|e| e.is_image)
@@ -374,6 +425,17 @@ pub(crate) mod testutil {
 
     /// `files`: (path, content, compress). Directory listings are derived.
     pub fn build_v1(salt: u16, files: &[(&str, &[u8], bool)]) -> Vec<u8> {
+        build_v1_impl(salt, files, true)
+    }
+
+    /// The same archive without any directory listing - the way "locked"
+    /// mods ship: every file is there, addressable by hash only.
+    pub fn build_locked_v1(salt: u16, files: &[(&str, &[u8])]) -> Vec<u8> {
+        let files: Vec<(&str, &[u8], bool)> = files.iter().map(|(p, c)| (*p, *c, false)).collect();
+        build_v1_impl(salt, &files, false)
+    }
+
+    fn build_v1_impl(salt: u16, files: &[(&str, &[u8], bool)], listings: bool) -> Vec<u8> {
         use std::collections::BTreeMap;
         let mut dirs: BTreeMap<String, Vec<String>> = BTreeMap::new();
         dirs.entry(String::new()).or_default();
@@ -413,7 +475,7 @@ pub(crate) mod testutil {
             let flags = if *compress { 0x2 } else { 0 };
             blobs.push((hash_path(path, salt), flags, stored, content.len() as u32));
         }
-        for (dir, lines) in &dirs {
+        for (dir, lines) in dirs.iter().filter(|_| listings) {
             let text = lines.join("\n").into_bytes();
             blobs.push((hash_path(dir, salt), 0x1, text.clone(), text.len() as u32));
         }

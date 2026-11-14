@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::categories::is_official;
 use crate::game::{detect_game_installs, install_for_overrides, Game, GameInstall};
 use crate::load_order::DEFAULT_MAP_BASE_NAMES;
 use crate::profile::default_data_dir;
@@ -26,6 +27,50 @@ pub struct GameSettings {
     pub last_profile: Option<PathBuf>,
 }
 
+/// How the mod library was last looked at: its sort order and filters.
+/// The search text is deliberately not part of it - a forgotten search
+/// from last time would hide mods for no visible reason.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViewSettings {
+    /// `name` or `date`.
+    pub sort: String,
+    /// Category token to show, or empty for all.
+    pub category: String,
+    /// `local`, `workshop`, or empty for both.
+    pub source: String,
+    /// Show favourites only.
+    pub favorites: bool,
+}
+
+impl Default for ViewSettings {
+    fn default() -> Self {
+        Self {
+            sort: "name".to_string(),
+            category: String::new(),
+            source: String::new(),
+            favorites: false,
+        }
+    }
+}
+
+impl ViewSettings {
+    /// Anything this version does not know falls back to the default, so
+    /// a hand-edited or newer file can never leave the library filtered by
+    /// something the screen has no control for.
+    pub fn normalize(&mut self) {
+        if !matches!(self.sort.as_str(), "name" | "date") {
+            self.sort = "name".to_string();
+        }
+        if !self.category.is_empty() && !is_official(&self.category) {
+            self.category.clear();
+        }
+        if !matches!(self.source.as_str(), "" | "local" | "workshop") {
+            self.source.clear();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -37,6 +82,8 @@ pub struct Settings {
     /// order (matched case-insensitively against name and display name).
     pub map_base_names: Vec<String>,
     pub last_game: Option<Game>,
+    /// Sort order and filters of the mod library.
+    pub view: ViewSettings,
     pub ets2: GameSettings,
     pub ats: GameSettings,
 }
@@ -48,6 +95,7 @@ impl Default for Settings {
             backup_keep: 10,
             map_base_names: DEFAULT_MAP_BASE_NAMES.iter().map(|s| s.to_string()).collect(),
             last_game: None,
+            view: ViewSettings::default(),
             ets2: GameSettings::default(),
             ats: GameSettings::default(),
         }
@@ -60,10 +108,12 @@ pub fn default_settings_path() -> PathBuf {
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        fs::read(path)
+        let mut settings: Settings = fs::read(path)
             .ok()
             .and_then(|raw| serde_json::from_slice(&raw).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        settings.view.normalize();
+        settings
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -169,6 +219,35 @@ mod tests {
         assert_eq!(loaded.backup_keep, 2);
         assert!(loaded.workshop_lookup);
         assert!(!loaded.map_base_names.is_empty());
+    }
+
+    #[test]
+    fn view_survives_a_restart_and_unknown_values_fall_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let mut s = Settings::default();
+        s.view = ViewSettings {
+            sort: "date".into(),
+            category: "truck".into(),
+            source: "workshop".into(),
+            favorites: true,
+        };
+        s.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).view, s.view);
+
+        // a file written before the view was stored
+        fs::write(&path, br#"{"backup_keep": 2}"#).unwrap();
+        assert_eq!(Settings::load(&path).view, ViewSettings::default());
+
+        // values this version has no control for
+        fs::write(
+            &path,
+            br#"{"view": {"sort": "size", "category": "no_such", "source": "ftp", "favorites": true}}"#,
+        )
+        .unwrap();
+        let view = Settings::load(&path).view;
+        assert_eq!((view.sort.as_str(), view.category.as_str(), view.source.as_str()), ("name", "", ""));
+        assert!(view.favorites);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { open as pickOpen, save as pickSave } from "@tauri-apps/plugin-dialog";
 import { $, confirmModal, dismissDialog, h, infoModal, openDialog } from "./dom";
 
@@ -28,7 +28,14 @@ interface Mod {
   version: string;
   categories: string[];
   manifest_categories: string[];
-  category_override: string | null;
+  /** Categories pinned by hand, the main one first; empty when automatic. */
+  category_pins: string[];
+  /** What the categories would be without pins. */
+  auto_categories: string[];
+  /** Files a locked archive holds without listing them, and how many of
+   *  those could be named all the same. */
+  hidden_files: number;
+  hidden_named: number;
   group_token: string;
   is_map: boolean;
   error: string | null;
@@ -83,11 +90,20 @@ interface GameSettings {
   last_profile: string | null;
 }
 
+/** Sort order and filters of the library, kept across restarts. */
+interface ViewSettings {
+  sort: string;
+  category: string;
+  source: string;
+  favorites: boolean;
+}
+
 interface Settings {
   workshop_lookup: boolean;
   backup_keep: number;
   map_base_names: string[];
   last_game: GameId | null;
+  view: ViewSettings;
   ets2: GameSettings;
   ats: GameSettings;
 }
@@ -115,6 +131,20 @@ interface DeleteResult {
   skipped_workshop: number;
 }
 
+interface ExtractOutcome {
+  /** Folder the files went to; null when nothing could be written. */
+  dest: string | null;
+  total: number;
+  extracted: number;
+  failed: number;
+  cancelled: boolean;
+  /** Files a locked archive does not list whose path was recovered. */
+  recovered: number;
+  /** Files whose path stayed unknown; written by hash into `_unnamed`. */
+  unnamed: number;
+  failures: { entry: string; error: string }[];
+}
+
 interface WorkshopFetch {
   asked: number;
   titles: number;
@@ -136,6 +166,8 @@ const NO_PLAN: SortPlan = { order: [], sorted: true, held: [], partners: {} };
 interface Constants {
   categories: string[];
   groups: string[];
+  /** category token -> id of the load-order group it sorts into. */
+  category_groups: Record<string, string>;
 }
 
 // --------------------------------------------------------------- labels
@@ -182,7 +214,7 @@ const groupLabel = (id: string) => GROUP_LABEL[id] ?? id;
 // ---------------------------------------------------------------- state
 
 const state = {
-  constants: { categories: [], groups: [] } as Constants,
+  constants: { categories: [], groups: [], category_groups: {} } as Constants,
   installs: [] as InstallInfo[],
   game: "ets2" as GameId,
   mods: [] as Mod[],
@@ -554,7 +586,21 @@ function renderLibrary() {
   grid.replaceChildren(...mods.map((m) => modCard(m, active.has(m.id))));
 }
 
+/** Values of the card's category select that are not category tokens. */
+const MULTI_PINS = "__multi";
+const EDIT_PINS = "__edit";
+
+function lockedTitle(m: Mod): string {
+  return (
+    `파일 목록을 숨긴 아카이브입니다. 숨은 파일 ${m.hidden_files.toLocaleString("ko-KR")}개 중 ` +
+    `${m.hidden_named.toLocaleString("ko-KR")}개의 이름을 확인했습니다.\n` +
+    "내용으로 분류를 판별하기 어려우므로, 자동 분류가 맞지 않으면 분류를 직접 지정하세요."
+  );
+}
+
 function modCard(m: Mod, isActive: boolean): HTMLElement {
+  const pins = m.category_pins;
+  const current = pins.length === 0 ? "" : pins.length === 1 ? pins[0] : MULTI_PINS;
   const iconHolder = h("div", { class: "card-icon", "data-mod-id": m.id }, h("span", {}, "SCS"));
   if (m.has_icon) {
     const cached = icons.get(`${state.game}/${m.id}`);
@@ -566,18 +612,28 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
     "select",
     {
       class: "cat-select",
-      title: "분류 변경",
+      // the control is narrow: the full pinned list goes into the tooltip
+      title: pins.length ? `수동 분류: ${pins.map(catLabel).join(" + ")} (대표: ${catLabel(pins[0])})` : "분류 변경",
       "aria-label": "분류 변경",
       onchange: (ev: Event) => {
-        const value = (ev.target as HTMLSelectElement).value;
-        void setOverride(m, value || null);
+        const select = ev.target as HTMLSelectElement;
+        if (select.value === EDIT_PINS) {
+          // not a category: put the choice back and open the editor
+          select.value = current;
+          void openCategoryDialog(m);
+        } else if (select.value !== MULTI_PINS) {
+          void setOverride(m, select.value ? [select.value] : []);
+        }
       },
     },
-    h("option", { value: "", selected: !m.category_override }, "자동 분류"),
-    ...state.constants.categories.map((c) =>
-      h("option", { value: c, selected: m.category_override === c }, catLabel(c)),
-    ),
+    h("option", { value: "", selected: current === "" }, "자동 분류"),
+    pins.length > 1
+      ? h("option", { value: MULTI_PINS, selected: true }, `수동: ${pins.map(catLabel).join(" + ")}`)
+      : null,
+    ...state.constants.categories.map((c) => h("option", { value: c, selected: current === c }, catLabel(c))),
+    h("option", { value: EDIT_PINS }, "여러 분류 지정…"),
   );
+  const locked = m.hidden_files > 0;
 
   const meta = [m.author, m.version && `v${m.version}`].filter(Boolean).join(" · ");
   return h(
@@ -593,9 +649,10 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
         "div",
         { class: "badges" },
         ...m.categories.map((c) =>
-          h("span", { class: "badge cat" + (m.category_override ? " pinned" : "") }, catLabel(c)),
+          h("span", { class: "badge cat" + (pins.length ? " pinned" : "") }, catLabel(c)),
         ),
         h("span", { class: "badge src" }, m.source === "workshop" ? "창작마당" : "로컬"),
+        locked ? h("span", { class: "badge keep", title: lockedTitle(m) }, "목록 숨김") : null,
         m.compat === "incompatible"
           ? h("span", { class: "badge err", title: compatTitle(m.compatible_versions) }, "버전 불일치")
           : null,
@@ -828,9 +885,109 @@ async function save() {
   }
 }
 
-async function setOverride(m: Mod, token: string | null) {
+/** Pick every category a mod covers, and which of them is the main
+ *  one. For mods that are several things at once, and for locked archives
+ *  whose content cannot tell what they are. */
+async function openCategoryDialog(m: Mod) {
+  const categories = state.constants.categories;
+  // start from the pins, or from what the automatic result says
+  const chosen = new Set(m.category_pins.length ? m.category_pins : m.auto_categories);
+  let main = (m.category_pins.length ? m.category_pins : m.auto_categories)[0] ?? "";
+  const error = h("div", { class: "form-error", role: "alert" });
+  const summary = h("div", { class: "form-note" });
+  const grid = h("div", { class: "cat-grid" });
+
+  const draw = () => {
+    if (!chosen.has(main)) main = categories.find((c) => chosen.has(c)) ?? "";
+    grid.replaceChildren(
+      ...categories.map((c) => {
+        const check = h("input", { type: "checkbox", checked: chosen.has(c), "data-cat": c });
+        check.addEventListener("change", () => {
+          if (check.checked) chosen.add(c);
+          else chosen.delete(c);
+          if (chosen.size === 1 && check.checked) main = c;
+          draw();
+          grid.querySelector<HTMLInputElement>(`input[type="checkbox"][data-cat="${c}"]`)?.focus();
+        });
+        const radio = h("input", {
+          type: "radio",
+          name: "cat-main",
+          checked: main === c,
+          disabled: !chosen.has(c),
+          "data-main": c,
+          "aria-label": `${catLabel(c)}을(를) 대표 분류로`,
+        });
+        radio.addEventListener("change", () => {
+          main = c;
+          draw();
+          grid.querySelector<HTMLInputElement>(`input[type="radio"][data-main="${c}"]`)?.focus();
+        });
+        return h(
+          "div",
+          { class: "cat-row" + (chosen.has(c) ? " on" : "") + (main === c ? " main" : "") },
+          h("label", { class: "form-check" }, check, h("span", {}, catLabel(c))),
+          h("label", { class: "cat-main" + (chosen.has(c) ? "" : " off") }, radio, h("span", {}, "대표")),
+        );
+      }),
+    );
+    summary.textContent = main
+      ? `대표 분류: ${catLabel(main)} → 로드 순서 그룹 '${groupLabel(state.constants.category_groups[main] ?? "")}'`
+      : "분류를 하나 이상 고르세요.";
+    error.textContent = "";
+  };
+  draw();
+
+  const facts = [
+    `자동 분류: ${m.auto_categories.map(catLabel).join(", ")}`,
+    `모드가 선언한 분류: ${m.manifest_categories.join(", ") || "없음"}`,
+  ];
+  if (m.hidden_files > 0) {
+    facts.push(
+      `파일 목록을 숨긴 아카이브입니다 (숨은 파일 ${m.hidden_files.toLocaleString("ko-KR")}개 중 ` +
+        `${m.hidden_named.toLocaleString("ko-KR")}개 이름 확인). 내용으로 분류를 판별하기 어렵습니다.`,
+    );
+  }
+  const body = h(
+    "div",
+    { class: "form" },
+    h(
+      "div",
+      {},
+      "이 모드가 다루는 분류를 모두 고르세요. '대표'로 고른 분류가 로드 순서의 그룹을 정하고, 나머지는 분류 필터와 배지에 쓰입니다.",
+    ),
+    h("div", { class: "form-note" }, facts.join("\n")),
+    grid,
+    summary,
+    error,
+  );
+
+  type Action = "cancel" | "auto" | "apply";
+  const action = await openDialog<Action>({
+    title: `분류 지정 — ${m.display_name}`,
+    body,
+    wide: true,
+    dismiss: "cancel",
+    buttons: [
+      { label: "취소", value: "cancel" },
+      { label: "자동 분류로", value: "auto" },
+      { label: "적용", value: "apply", kind: "primary" },
+    ],
+    beforeClose: (value) => {
+      if (value === "apply" && chosen.size === 0) {
+        error.textContent = "분류를 하나 이상 고르거나 '자동 분류로'를 누르세요.";
+        return false;
+      }
+    },
+  });
+  if (action === "cancel") return;
+  // the main category first, the rest in the game's own order
+  const tokens = action === "auto" ? [] : [main, ...categories.filter((c) => chosen.has(c) && c !== main)];
+  await setOverride(m, tokens);
+}
+
+async function setOverride(m: Mod, tokens: string[]) {
   try {
-    await invoke("set_category_override", { game: state.game, id: m.id, token });
+    await invoke("set_category_override", { game: state.game, id: m.id, tokens });
     // categories feed both the cards and the list's group tokens
     state.mods = await invoke<Mod[]>("scan_mods", { game: state.game });
     const savedItems = JSON.parse(state.saved) as ActiveItem[];
@@ -841,8 +998,9 @@ async function setOverride(m: Mod, token: string | null) {
     state.saved = JSON.stringify(saved);
     await relayout();
     setStatus(
-      token
-        ? `'${m.display_name}'의 분류를 ${catLabel(token)}(으)로 고정했습니다.`
+      tokens.length
+        ? `'${m.display_name}'의 분류를 ${tokens.map(catLabel).join(" + ")}(으)로 고정했습니다.` +
+            (tokens.length > 1 ? ` 로드 순서는 ${catLabel(tokens[0])} 기준입니다.` : "")
         : `'${m.display_name}'의 분류를 자동으로 되돌렸습니다.`,
       "ok",
     );
@@ -987,14 +1145,18 @@ async function toggleFavorite(m: Mod) {
   }
 }
 
-type DetailAction = "close" | "reveal" | "workshop" | "delete";
+type DetailAction = "close" | "reveal" | "workshop" | "delete" | "extract";
+
+/** Archive formats the extractor can walk. A mod that is already a folder
+ *  has nothing to extract. */
+const EXTRACTABLE = new Set(["zip", "hashfs_v1", "hashfs_v2"]);
 
 async function openDetails(m: Mod) {
   const icon = icons.get(`${state.game}/${m.id}`);
   const rows: [string, string][] = [
     ["제작자", m.author || "-"],
     ["버전", m.version || "-"],
-    ["분류", m.categories.map(catLabel).join(", ") + (m.category_override ? " (수동 고정)" : "")],
+    ["분류", m.categories.map(catLabel).join(", ") + (m.category_pins.length ? " (수동 고정)" : "")],
     ["모드가 선언한 분류", m.manifest_categories.join(", ") || "-"],
     ["출처", m.source === "workshop" ? "Steam 창작마당" : "로컬 모드 폴더"],
     ["형식", m.format],
@@ -1002,6 +1164,12 @@ async function openDetails(m: Mod) {
     ["설치일", m.installed_at ? new Date(m.installed_at * 1000).toLocaleString("ko-KR") : "-"],
     ["파일", m.path],
   ];
+  if (m.hidden_files > 0) {
+    rows.push([
+      "파일 목록",
+      `숨김 — 숨은 파일 ${m.hidden_files.toLocaleString("ko-KR")}개 중 ${m.hidden_named.toLocaleString("ko-KR")}개 이름 확인`,
+    ]);
+  }
   if (m.error) rows.push(["읽기 오류", m.error]);
   const error = h("div", { class: "form-error", role: "alert" });
   const body = h(
@@ -1016,6 +1184,7 @@ async function openDetails(m: Mod) {
     { label: "닫기", value: "close" },
     { label: "파일 위치 열기", value: "reveal" },
   ];
+  if (EXTRACTABLE.has(m.format) && !m.error) buttons.push({ label: "추출…", value: "extract" });
   if (m.source === "workshop") buttons.push({ label: "창작마당 페이지", value: "workshop" });
   else buttons.push({ label: "휴지통으로 삭제", value: "delete", kind: "danger" });
 
@@ -1036,6 +1205,126 @@ async function openDetails(m: Mod) {
     },
   });
   if (action === "delete") await deleteMod(m);
+  else if (action === "extract") await extractMod(m);
+}
+
+/** Ask where to, then unpack the mod's archive into a new folder there. */
+async function extractMod(m: Mod) {
+  try {
+    const parent = await pickOpen({
+      directory: true,
+      multiple: false,
+      title: `'${m.display_name}'을(를) 추출할 위치`,
+    });
+    if (typeof parent === "string") await extractModTo(m.id, parent);
+  } catch (e) {
+    setStatus(errorText(e), "error");
+  }
+}
+
+async function extractModTo(id: string, parent: string) {
+  const m = state.mods.find((x) => x.id === id);
+  if (!m) throw new Error("스캔 목록에 없는 모드입니다.");
+  const game = state.game;
+
+  const bar = h("progress", { class: "extract-bar", max: "1", value: "0" });
+  const count = h("div", { class: "form-note" }, "아카이브를 여는 중…");
+  const body = h(
+    "div",
+    { class: "form" },
+    h("div", {}, `'${m.display_name}'의 파일을 푸는 중입니다. 모드 파일은 읽기만 합니다.`),
+    bar,
+    count,
+  );
+  const onProgress = new Channel<{ done: number; total: number }>();
+  onProgress.onmessage = ({ done, total }) => {
+    bar.max = Math.max(total, 1);
+    bar.value = done;
+    count.textContent = `${done.toLocaleString("ko-KR")} / ${total.toLocaleString("ko-KR")}개`;
+  };
+
+  // closing the progress dialog in any way (button, Escape, backdrop) is
+  // a request to stop; the dialog goes away on its own when the run ends
+  let running = true;
+  let dialogOpen = true;
+  void openDialog<void>({
+    title: "아카이브 추출",
+    body,
+    dismiss: undefined,
+    buttons: [{ label: "취소", value: undefined }],
+  }).then(() => {
+    dialogOpen = false;
+    if (running) {
+      setStatus("추출을 멈추는 중…");
+      invoke("cancel_extract").catch(() => {});
+    }
+  });
+
+  let r: ExtractOutcome;
+  try {
+    r = await invoke<ExtractOutcome>("extract_mod", {
+      game,
+      id,
+      destParent: parent,
+      folderName: m.display_name,
+      onProgress,
+    });
+  } catch (e) {
+    running = false;
+    if (dialogOpen) dismissDialog();
+    setStatus(`추출 실패: ${errorText(e)}`, "error");
+    return;
+  }
+  running = false;
+  if (dialogOpen) dismissDialog();
+
+  const n = (v: number) => v.toLocaleString("ko-KR");
+  const lines: string[] = [];
+  if (r.cancelled) lines.push(`추출을 취소했습니다. 그때까지 푼 파일 ${n(r.extracted)}개는 폴더에 남아 있습니다.`);
+  else if (r.total === 0) lines.push("추출할 수 있는 파일이 없습니다.");
+  else lines.push(`파일 ${n(r.total)}개 중 ${n(r.extracted)}개를 풀었습니다.`);
+  if (r.dest) lines.push(`위치: ${r.dest}`);
+  if (r.recovered + r.unnamed > 0) {
+    lines.push(
+      "",
+      "이 아카이브는 파일 목록이 숨겨져 있습니다(잠긴 아카이브).",
+      `  이름을 되찾은 파일: ${n(r.recovered)}개 (원래 경로에 풀었습니다)`,
+      `  이름을 찾지 못한 파일: ${n(r.unnamed)}개` +
+        (r.unnamed ? " ('_unnamed' 폴더에 해시 이름으로 풀었습니다. 확장자는 내용으로 추정했습니다)" : ""),
+    );
+  }
+  if (r.failed > 0) {
+    lines.push("", `풀지 못한 파일 ${n(r.failed)}개:`);
+    lines.push(...r.failures.slice(0, 20).map((f) => `  ${f.entry}  (${f.error})`));
+    if (r.failed > 20) lines.push(`  … 외 ${n(r.failed - 20)}개`);
+  }
+  const ok = !r.cancelled && r.failed === 0 && r.extracted > 0;
+  setStatus(
+    r.cancelled
+      ? "추출을 취소했습니다."
+      : `'${m.display_name}': 파일 ${n(r.extracted)}개를 추출했습니다.` + (r.failed ? ` 실패 ${n(r.failed)}개.` : ""),
+    ok ? "ok" : r.cancelled ? "info" : "error",
+  );
+
+  const error = h("div", { class: "form-error", role: "alert" });
+  const buttons: { label: string; value: "close" | "open"; kind?: "primary" }[] = [{ label: "닫기", value: "close" }];
+  if (r.dest) buttons.push({ label: "폴더 열기", value: "open", kind: "primary" });
+  await openDialog<"close" | "open">({
+    title: r.cancelled ? "추출 취소됨" : "추출 완료",
+    body: h("div", { class: "form" }, h("div", { class: "report" }, lines.join("\n")), error),
+    wide: true,
+    dismiss: "close",
+    buttons,
+    beforeClose: async (value) => {
+      if (value !== "open") return;
+      try {
+        await invoke("open_extracted");
+      } catch (e) {
+        error.textContent = errorText(e);
+        return false;
+      }
+    },
+  });
 }
 
 async function deleteMod(m: Mod) {
@@ -1526,10 +1815,37 @@ async function openShareMenu() {
 // The same entry points without the native file picker, so automated UI
 // checks can drive the flows with a path of their own.
 Object.assign(window, {
-  __scsmm: { exportShareTo, importShareFrom, exportMapComboTo, importMapComboFrom },
+  __scsmm: { exportShareTo, importShareFrom, exportMapComboTo, importMapComboFrom, extractModTo },
 });
 
 // ----------------------------------------------------------------- boot
+
+/** Store the library's sort order and filters for the next start (best
+ *  effort). The search text is left out on purpose. */
+function rememberView() {
+  const { sort, category, source, favorites } = state.filter;
+  const view: ViewSettings = { sort, category, source, favorites };
+  if (state.settings) state.settings.settings.view = view;
+  invoke("remember_view", { view }).catch(() => {});
+}
+
+/** Put the stored sort order and filters back, on the controls too. */
+function restoreView(view: ViewSettings | undefined) {
+  if (!view) return;
+  const filter = state.filter;
+  const pick = (id: string, wanted: string, fallback: string) => {
+    const select = $<HTMLSelectElement>(id);
+    select.value = wanted;
+    // a value the control has no option for must not filter invisibly
+    if (select.value !== wanted) select.value = fallback;
+    return select.value;
+  };
+  filter.sort = pick("sort", view.sort, "name");
+  filter.category = pick("filter-category", view.category, "");
+  filter.source = pick("filter-source", view.source, "");
+  filter.favorites = view.favorites;
+  $<HTMLInputElement>("filter-favorites").checked = view.favorites;
+}
 
 function bindControls() {
   const filter = state.filter;
@@ -1541,6 +1857,7 @@ function bindControls() {
     $<HTMLSelectElement>(id).addEventListener("change", (ev) => {
       filter[key] = (ev.target as HTMLSelectElement).value;
       renderLibrary();
+      rememberView();
     });
   bindSelect("filter-category", "category");
   bindSelect("filter-source", "source");
@@ -1548,6 +1865,7 @@ function bindControls() {
   $<HTMLInputElement>("filter-favorites").addEventListener("change", (ev) => {
     filter.favorites = (ev.target as HTMLInputElement).checked;
     renderLibrary();
+    rememberView();
   });
   $("open-settings").addEventListener("click", () => void openSettings());
   $("open-backups").addEventListener("click", () => void openBackups());
@@ -1596,6 +1914,7 @@ async function boot() {
     h("option", { value: "" }, "모든 분류"),
     ...state.constants.categories.map((c) => h("option", { value: c }, catLabel(c))),
   );
+  restoreView(state.settings.settings.view);
   if (state.installs.length === 0) {
     renderGameSwitch();
     renderAll();

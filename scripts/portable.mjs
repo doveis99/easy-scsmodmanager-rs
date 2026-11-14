@@ -9,6 +9,7 @@
 
 import { execFileSync, execSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,8 +21,21 @@ const folderName = "Easy SCS Mod Manager";
 const outRoot = join(root, "dist-portable");
 const outDir = join(outRoot, folderName);
 
+// The compiler bakes absolute source paths into the binary (panic
+// messages of every dependency): the builder's home folder, and with it
+// their user name, would ship in the executable. Map them away.
+const flags = [
+  ...(process.env.CARGO_ENCODED_RUSTFLAGS?.split("\x1f") ?? process.env.RUSTFLAGS?.split(/\s+/) ?? []).filter(Boolean),
+  `--remap-path-prefix=${homedir()}=~`,
+  `--remap-path-prefix=${root}=.`,
+];
+
 console.log(`building ${folderName} ${version} ...`);
-execSync("pnpm tauri build --no-bundle", { cwd: root, stdio: "inherit" });
+execSync("pnpm tauri build --no-bundle", {
+  cwd: root,
+  stdio: "inherit",
+  env: { ...process.env, CARGO_ENCODED_RUSTFLAGS: flags.join("\x1f") },
+});
 
 const built = join(root, "target", "release", exeName);
 if (!existsSync(built)) {

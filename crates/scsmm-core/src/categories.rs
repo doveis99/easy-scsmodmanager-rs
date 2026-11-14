@@ -57,17 +57,22 @@ pub fn canonical_categories<S: AsRef<str>>(raw: &[S]) -> Vec<String> {
     result
 }
 
-/// Trustworthy category: override > content category > map-by-content >
-/// manifest.
-pub fn effective_categories<S: AsRef<str>>(
+/// Trustworthy categories: manual pins > content category >
+/// map-by-content > manifest.
+///
+/// `pins` are the categories the user set by hand, the main one first. A
+/// mod that covers several things (a truck with its own sounds and
+/// interior) can be pinned to all of them: the first decides where it goes
+/// in the load order, the rest only say what else it is.
+pub fn effective_categories<S: AsRef<str>, P: AsRef<str>>(
     manifest_categories: &[S],
     is_map: bool,
-    override_token: Option<&str>,
+    pins: &[P],
     content_category: Option<&str>,
 ) -> Vec<String> {
     let single = |t: &str| vec![if is_official(t) { t } else { OTHER }.to_string()];
-    if let Some(t) = override_token {
-        return single(t);
+    if !pins.is_empty() {
+        return canonical_categories(pins);
     }
     if let Some(t) = content_category {
         return single(t);
@@ -128,11 +133,17 @@ mod tests {
     #[test]
     fn effective_priority() {
         let m = ["truck"];
-        assert_eq!(effective_categories(&m, false, None, None), ["truck"]);
-        assert_eq!(effective_categories(&m, true, None, None), ["map"]);
-        assert_eq!(effective_categories(&m, true, None, Some("physics")), ["physics"]);
-        assert_eq!(effective_categories(&m, true, Some("sound"), Some("physics")), ["sound"]);
-        assert_eq!(effective_categories(&m, false, Some("bogus"), None), ["other"]);
+        let none: [&str; 0] = [];
+        assert_eq!(effective_categories(&m, false, &none, None), ["truck"]);
+        assert_eq!(effective_categories(&m, true, &none, None), ["map"]);
+        assert_eq!(effective_categories(&m, true, &none, Some("physics")), ["physics"]);
+        assert_eq!(effective_categories(&m, true, &["sound"], Some("physics")), ["sound"]);
+        assert_eq!(effective_categories(&m, false, &["bogus"], None), ["other"]);
+        // several pins: order kept (the first is the main one), no repeats
+        assert_eq!(
+            effective_categories(&m, true, &["truck", "sound", "truck", "interior"], Some("physics")),
+            ["truck", "sound", "interior"]
+        );
     }
 
     #[test]

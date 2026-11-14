@@ -64,7 +64,7 @@ fn scan(install: &GameInstall, libs: &[std::path::PathBuf]) -> Vec<ScannedMod> {
     let version = game::read_game_version(&install.documents_dir);
     let install_dir = game::find_game_install_dir(install.game, libs);
     let owned = game::owned_dlc_tokens(install_dir.as_deref());
-    scanner::scan_game_install(install, version.as_deref(), owned.as_ref())
+    scanner::scan_game_install(install, version.as_deref(), owned.as_ref(), None)
 }
 
 fn cmd_installs() -> Result<(), String> {
@@ -97,7 +97,7 @@ fn cmd_scan(args: &Args) -> Result<(), String> {
     let mut by_category: BTreeMap<String, usize> = BTreeMap::new();
     let mut failed = 0;
     for m in &mods {
-        let cats = m.effective_categories(None);
+        let cats = m.effective_categories(&[]);
         *by_category.entry(cats[0].clone()).or_default() += 1;
         let source = if m.workshop_id().is_some() { "ws" } else { "local" };
         let note = match &m.error {
@@ -164,7 +164,7 @@ fn cmd_order(args: &Args) -> Result<(), String> {
             return load_order::MAP_BASE.to_string();
         }
         match matcher.lookup(a) {
-            Some(i) => mods[i].effective_categories(None)[0].clone(),
+            Some(i) => mods[i].effective_categories(&[])[0].clone(),
             None => "other".to_string(),
         }
     };
@@ -233,6 +233,14 @@ fn cmd_extract(rest: &[String]) -> Result<(), String> {
         started.elapsed(),
         result.failed
     );
+    if result.recovered + result.unnamed > 0 {
+        println!(
+            "locked archive: {} file names recovered, {} files without a name written to {}/",
+            result.recovered,
+            result.unnamed,
+            scsmm_core::extract::UNNAMED_DIR
+        );
+    }
     for f in &result.failures {
         println!("  failed: {}  ({})", f.entry, f.error);
     }

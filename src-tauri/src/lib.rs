@@ -7,10 +7,13 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::Serialize;
+use tauri::ipc::Channel;
 use tauri::State;
 
 use scsmm_core::categories::{is_official, OFFICIAL_CATEGORIES};
@@ -22,7 +25,10 @@ use scsmm_core::load_order::{self, Row, GROUPS, MAP_BASE};
 use scsmm_core::manifest::sniff_image_mime;
 use scsmm_core::profile::{self, ActiveMod};
 use scsmm_core::scanner::{self, ScannedMod};
-use scsmm_core::settings::{default_settings_path, Settings};
+use scsmm_core::extract::{extract_scs_with, ExtractOptions, ExtractResult};
+use scsmm_core::gamepaths::GamePaths;
+use scsmm_core::scs::ScsFormat;
+use scsmm_core::settings::{default_settings_path, Settings, ViewSettings};
 use scsmm_core::share::{self, check_share, MapComboEntry, ShareCheck, ShareList};
 use scsmm_core::steam;
 use scsmm_core::workshop_api::{self, WorkshopCache};
@@ -36,6 +42,12 @@ fn err(e: impl std::fmt::Display) -> String {
 #[derive(Default)]
 struct AppState {
     inner: Mutex<Inner>,
+    /// One extraction at a time; the flags are outside the lock because
+    /// the extraction runs for seconds and must stay cancellable.
+    extract_busy: AtomicBool,
+    extract_cancel: AtomicBool,
+    /// Folder of the last extraction - the only one the UI may ask to open.
+    last_extract: Mutex<Option<PathBuf>>,
 }
 
 /// Per-game string sets / maps are keyed by the game's short name.
@@ -49,8 +61,9 @@ struct Inner {
     versions: HashMap<Game, Option<String>>,
     /// active name -> display name as the game wrote it into the profiles.
     profile_names: HashMap<Game, HashMap<String, String>>,
-    /// mod name -> category token. Loaded lazily from disk.
-    overrides: Option<PerGame<HashMap<String, String>>>,
+    /// mod name -> pinned category tokens, the main one first. Loaded
+    /// lazily from disk.
+    overrides: Option<PerGame<HashMap<String, Vec<String>>>>,
     /// Favourited mod names. Loaded lazily from disk.
     favorites: Option<PerGame<BTreeSet<String>>>,
     /// Steam Workshop titles and previews. Loaded lazily from disk.
@@ -79,6 +92,23 @@ fn workshop_cache_dir() -> PathBuf {
         return profile::default_data_dir().join("cache").join("workshop");
     }
     system_workshop_cache_dir()
+}
+
+/// The list of the game's own file paths, which names the files of
+/// locked archives. Cache as well: rebuilt from the game when missing.
+fn game_paths_cache(game: Game) -> PathBuf {
+    let base = workshop_cache_dir();
+    base.parent()
+        .unwrap_or(&base)
+        .join("gamepaths")
+        .join(format!("{}.bin", game.short_name().to_lowercase()))
+}
+
+/// Open (or build) the path list of `game`. `None` when the game's
+/// install folder is not found - locked archives then stay as they were.
+fn game_paths_for(game: Game, libs: &[PathBuf]) -> Option<GamePaths> {
+    let install_dir = game::find_game_install_dir(game, libs)?;
+    GamePaths::load_or_build(&install_dir, &game_paths_cache(game)).ok()
 }
 
 fn system_workshop_cache_dir() -> PathBuf {
@@ -154,6 +184,32 @@ fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
         .unwrap_or_default()
 }
 
+/// A pin as it may be on disk: older versions stored one token per mod.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum PinsOnDisk {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn load_overrides(path: &Path) -> PerGame<HashMap<String, Vec<String>>> {
+    let on_disk: PerGame<HashMap<String, PinsOnDisk>> = load_json(path);
+    on_disk
+        .into_iter()
+        .map(|(game, pins)| {
+            let pins = pins
+                .into_iter()
+                .map(|(name, pin)| match pin {
+                    PinsOnDisk::One(token) => (name, vec![token]),
+                    PinsOnDisk::Many(tokens) => (name, tokens),
+                })
+                .filter(|(_, tokens)| !tokens.is_empty())
+                .collect();
+            (game, pins)
+        })
+        .collect()
+}
+
 fn save_json<T: Serialize>(path: &Path, value: &T) -> CmdResult<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(err)?;
@@ -172,9 +228,9 @@ impl Inner {
             .get_or_insert_with(|| WorkshopCache::open(&workshop_cache_dir()))
     }
 
-    fn overrides(&mut self) -> &mut PerGame<HashMap<String, String>> {
+    fn overrides(&mut self) -> &mut PerGame<HashMap<String, Vec<String>>> {
         self.overrides
-            .get_or_insert_with(|| load_json(&overrides_path()))
+            .get_or_insert_with(|| load_overrides(&overrides_path()))
     }
 
     fn favorites(&mut self) -> &mut PerGame<BTreeSet<String>> {
@@ -182,11 +238,13 @@ impl Inner {
             .get_or_insert_with(|| load_json(&favorites_path()))
     }
 
-    fn override_for(&mut self, game: Game, mod_name: &str) -> Option<String> {
+    /// The categories the user pinned the mod to; empty when automatic.
+    fn pins_for(&mut self, game: Game, mod_name: &str) -> Vec<String> {
         self.overrides()
             .get(game.short_name())
             .and_then(|m| m.get(mod_name))
             .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -239,10 +297,17 @@ struct ModDto {
     display_name: String,
     author: String,
     version: String,
-    /// Effective categories (override > content > manifest).
+    /// Effective categories (pins > content > manifest), main one first.
     categories: Vec<String>,
     manifest_categories: Vec<String>,
-    category_override: Option<String>,
+    /// The categories the user pinned by hand; empty when automatic.
+    category_pins: Vec<String>,
+    /// What the categories would be without pins.
+    auto_categories: Vec<String>,
+    /// Files the archive holds without listing them (a locked archive),
+    /// and how many of those could be named all the same.
+    hidden_files: usize,
+    hidden_named: usize,
     /// Token deciding the load-order group (map_base aware).
     group_token: String,
     is_map: bool,
@@ -284,6 +349,8 @@ struct Layout {
 struct Constants {
     categories: &'static [&'static str],
     groups: Vec<&'static str>,
+    /// category token -> id of the load-order group it sorts into.
+    category_groups: HashMap<&'static str, &'static str>,
 }
 
 #[derive(Serialize)]
@@ -394,8 +461,8 @@ fn build_dtos(inner: &mut Inner, game: Game) -> Vec<ModDto> {
                 Some(name) if manifest.display_name.is_empty() => name.to_string(),
                 _ => m.display_name(),
             };
-            let category_override = pins.and_then(|o| o.get(&id)).cloned();
-            let categories = m.effective_categories(category_override.as_deref());
+            let category_pins = pins.and_then(|o| o.get(&id)).cloned().unwrap_or_default();
+            let categories = m.effective_categories(&category_pins);
             ModDto {
                 group_token: group_token(&id, &display_name, &categories[0], &settings.map_base_names),
                 path: m.path.display().to_string(),
@@ -412,7 +479,10 @@ fn build_dtos(inner: &mut Inner, game: Game) -> Vec<ModDto> {
                 version: manifest.package_version,
                 categories,
                 manifest_categories: manifest.categories,
-                category_override,
+                auto_categories: m.effective_categories(&[]),
+                category_pins,
+                hidden_files: m.hidden.len(),
+                hidden_named: m.hidden_named,
                 is_map: m.is_map,
                 error: m.error.clone(),
                 installed_at: m.installed_at,
@@ -441,8 +511,8 @@ fn resolve(inner: &mut Inner, game: Game, entries: &[ActiveMod]) -> Vec<ActiveIt
             let hit = matcher.lookup(a).map(|i| &scanned[i]);
             let category = match hit {
                 Some(m) => {
-                    let pin = inner.override_for(game, &m.mod_name());
-                    m.effective_categories(pin.as_deref())[0].clone()
+                    let pins = inner.pins_for(game, &m.mod_name());
+                    m.effective_categories(&pins)[0].clone()
                 }
                 None => "other".to_string(),
             };
@@ -479,6 +549,10 @@ fn constants() -> Constants {
     Constants {
         categories: OFFICIAL_CATEGORIES,
         groups: GROUPS.iter().map(|g| g.id).collect(),
+        category_groups: OFFICIAL_CATEGORIES
+            .iter()
+            .map(|c| (*c, GROUPS[load_order::group_index_for_token(c)].id))
+            .collect(),
     }
 }
 
@@ -548,6 +622,7 @@ fn save_settings(mut settings: Settings, state: State<'_, AppState>) -> CmdResul
     // where the user last was is not part of the form; keep what we have
     let current = inner.settings().clone();
     settings.last_game = current.last_game;
+    settings.view = current.view.clone();
     for game in Game::ALL {
         settings.game_mut(game).last_profile = current.game(game).last_profile.clone();
     }
@@ -569,6 +644,19 @@ fn remember_place(game: String, profile_path: Option<String>, state: State<'_, A
     settings.save(&default_settings_path()).map_err(err)
 }
 
+/// Remember the library's sort order and filters, for the next start.
+#[tauri::command]
+fn remember_view(mut view: ViewSettings, state: State<'_, AppState>) -> CmdResult<()> {
+    view.normalize();
+    let mut inner = lock(&state)?;
+    let settings = inner.settings();
+    if settings.view == view {
+        return Ok(());
+    }
+    settings.view = view;
+    settings.save(&default_settings_path()).map_err(err)
+}
+
 // ------------------------------------------------------------------- //
 // commands: mods
 // ------------------------------------------------------------------- //
@@ -586,7 +674,8 @@ fn scan_game(game: Game, settings: &Settings) -> CmdResult<ScanOutcome> {
     let version = game::read_game_version(&install.documents_dir);
     let install_dir = game::find_game_install_dir(game, &libs);
     let owned = game::owned_dlc_tokens(install_dir.as_deref());
-    let mods = scanner::scan_game_install(&install, version.as_deref(), owned.as_ref());
+    let mut game_paths = game_paths_for(game, &libs);
+    let mods = scanner::scan_game_install(&install, version.as_deref(), owned.as_ref(), game_paths.as_mut());
 
     // many workshop manifests carry no display_name; the game mirrors the
     // real name into the profile's active_mods entry, so borrow it there
@@ -749,26 +838,32 @@ fn mod_icon(game: String, id: String, state: State<'_, AppState>) -> CmdResult<O
     }))
 }
 
-/// Pin a mod to a category (or clear the pin with `token: null`).
+/// Pin a mod to one or more categories - the first is the main one and
+/// decides the load-order group. An empty list clears the pin.
 #[tauri::command]
 fn set_category_override(
     game: String,
     id: String,
-    token: Option<String>,
+    tokens: Vec<String>,
     state: State<'_, AppState>,
 ) -> CmdResult<()> {
     let game = parse_game(&game)?;
-    if let Some(t) = &token {
-        if !is_official(t) {
+    let mut pins: Vec<String> = Vec::new();
+    for t in tokens {
+        if !is_official(&t) {
             return Err(format!("unknown category '{t}'"));
+        }
+        if !pins.contains(&t) {
+            pins.push(t);
         }
     }
     let mut inner = lock(&state)?;
     let per_game = inner.overrides().entry(game.short_name().to_string()).or_default();
-    match token {
-        Some(t) => per_game.insert(id, t),
-        None => per_game.remove(&id),
-    };
+    if pins.is_empty() {
+        per_game.remove(&id);
+    } else {
+        per_game.insert(id, pins);
+    }
     save_json(&overrides_path(), inner.overrides())
 }
 
@@ -893,6 +988,173 @@ fn reveal_mod(game: String, id: String, state: State<'_, AppState>) -> CmdResult
         .arg(path.parent().unwrap_or(&path))
         .spawn()
         .map_err(err)?;
+    Ok(())
+}
+
+#[derive(Serialize, Clone)]
+struct ExtractProgress {
+    done: usize,
+    total: usize,
+}
+
+#[derive(Serialize)]
+struct ExtractOutcome {
+    /// The folder the files went to. `None` when nothing could be written
+    /// (no file in the archive has a name) and no folder was left behind.
+    dest: Option<String>,
+    #[serde(flatten)]
+    result: ExtractResult,
+}
+
+/// Turn a mod's display name into one safe folder name. Display names come
+/// from manifests and from Steam, so they are untrusted: path separators,
+/// reserved characters and reserved device names must not get through.
+fn folder_name_for(wanted: &str, fallback: &str) -> String {
+    // Windows drops trailing dots and spaces from names, so they go too
+    let edge = |c: char| c == '.' || c.is_whitespace();
+    let clean = |raw: &str| -> String {
+        let replaced: String = raw
+            .chars()
+            .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
+            .collect();
+        let short: String = replaced.trim_matches(edge).chars().take(80).collect();
+        short.trim_end_matches(edge).to_string()
+    };
+    let mut name = clean(wanted);
+    if name.is_empty() {
+        name = clean(fallback);
+    }
+    if name.is_empty() {
+        name = "extracted".to_string();
+    }
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.ends_with(|c: char| c.is_ascii_digit()));
+    if reserved {
+        name.insert(0, '_');
+    }
+    name
+}
+
+/// `<parent>/<name>`, or `<name> (2)`, `(3)`... - the first that does not
+/// exist yet or is an empty folder. An extraction never mixes into files
+/// that are already there.
+fn free_folder(parent: &Path, name: &str) -> CmdResult<PathBuf> {
+    for n in 1..1000 {
+        let candidate = parent.join(if n == 1 { name.to_string() } else { format!("{name} ({n})") });
+        let usable = match fs::read_dir(&candidate) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(_) => !candidate.exists(),
+        };
+        if usable {
+            return Ok(candidate);
+        }
+    }
+    Err("추출할 폴더 이름을 정하지 못했습니다.".into())
+}
+
+/// Clears the busy flag however the extraction ends.
+struct BusyGuard<'a>(&'a AtomicBool);
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Unpack a scanned mod's archive into a new folder under `dest_parent`
+/// (the folder the user picked). The mod itself is only read.
+#[tauri::command(async)]
+fn extract_mod(
+    game: String,
+    id: String,
+    dest_parent: String,
+    folder_name: String,
+    on_progress: Channel<ExtractProgress>,
+    state: State<'_, AppState>,
+) -> CmdResult<ExtractOutcome> {
+    let game = parse_game(&game)?;
+    let (path, _) = scanned_path(&state, game, &id)?;
+    let parent = Path::new(&dest_parent);
+    if !parent.is_absolute() || !parent.is_dir() {
+        return Err("추출할 위치가 존재하는 폴더가 아닙니다.".into());
+    }
+    if !path.is_file() {
+        return Err("압축을 푼 폴더 형태의 모드는 추출할 필요가 없습니다. '파일 위치 열기'로 바로 볼 수 있습니다.".into());
+    }
+    match scsmm_core::scs::detect_format(&path).map_err(err)? {
+        ScsFormat::Zip | ScsFormat::HashfsV1 | ScsFormat::HashfsV2 => {}
+        _ => return Err("이 형식의 아카이브는 추출할 수 없습니다.".into()),
+    }
+
+    if state.extract_busy.swap(true, Ordering::SeqCst) {
+        return Err("이미 다른 추출이 진행 중입니다.".into());
+    }
+    let _busy = BusyGuard(&state.extract_busy);
+    state.extract_cancel.store(false, Ordering::SeqCst);
+
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let dest = free_folder(parent, &folder_name_for(&folder_name, &stem))?;
+
+    // the game's own paths give the files of a locked archive their names
+    let mut game_paths = game_paths_for(game, &steam::discover_steam_libraries());
+    let options = ExtractOptions {
+        game_paths: game_paths.as_mut(),
+    };
+
+    // the screen needs a steady trickle, not one message per file
+    let mut last_sent = Instant::now() - Duration::from_secs(1);
+    let result = extract_scs_with(
+        &path,
+        &dest,
+        options,
+        &mut |done, total| {
+            if done == total || last_sent.elapsed() >= Duration::from_millis(40) {
+                last_sent = Instant::now();
+                let _ = on_progress.send(ExtractProgress { done, total });
+            }
+        },
+        &|| state.extract_cancel.load(Ordering::SeqCst),
+    )
+    .map_err(err)?;
+
+    // nothing written: do not leave an empty folder behind (remove_dir
+    // refuses anything that is not empty)
+    let kept = result.extracted > 0 || fs::remove_dir(&dest).is_err() && dest.exists();
+    let dest = kept.then_some(dest);
+    if let Ok(mut slot) = state.last_extract.lock() {
+        *slot = dest.clone();
+    }
+    Ok(ExtractOutcome {
+        dest: dest.map(|d| d.display().to_string()),
+        result,
+    })
+}
+
+/// Ask the running extraction to stop after the file it is on.
+#[tauri::command]
+fn cancel_extract(state: State<'_, AppState>) {
+    state.extract_cancel.store(true, Ordering::SeqCst);
+}
+
+/// Open the folder of the last extraction in the system file manager.
+#[tauri::command]
+fn open_extracted(state: State<'_, AppState>) -> CmdResult<()> {
+    let dest = state
+        .last_extract
+        .lock()
+        .map_err(err)?
+        .clone()
+        .filter(|d| d.is_dir())
+        .ok_or("추출한 폴더가 더 이상 존재하지 않습니다.")?;
+    #[cfg(windows)]
+    std::process::Command::new("explorer.exe").arg(&dest).spawn().map_err(err)?;
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open").arg(&dest).spawn().map_err(err)?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    std::process::Command::new("xdg-open").arg(&dest).spawn().map_err(err)?;
     Ok(())
 }
 
@@ -1364,6 +1626,7 @@ pub fn run() {
             get_settings,
             save_settings,
             remember_place,
+            remember_view,
             scan_mods,
             mods_snapshot,
             fetch_workshop_meta,
@@ -1373,6 +1636,9 @@ pub fn run() {
             mod_usage,
             delete_mods,
             reveal_mod,
+            extract_mod,
+            cancel_extract,
+            open_extracted,
             open_workshop_page,
             list_profiles,
             read_load_order,
@@ -1392,4 +1658,62 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_names_are_one_safe_component() {
+        assert_eq!(folder_name_for("ProMods Europe v2.80", "x"), "ProMods Europe v2.80");
+        assert_eq!(folder_name_for("a/b\\c:d*e?f", "x"), "a_b_c_d_e_f");
+        assert_eq!(folder_name_for("..", "my_mod"), "my_mod");
+        assert_eq!(folder_name_for("  name. ", "x"), "name");
+        assert_eq!(folder_name_for("", ""), "extracted");
+        assert_eq!(folder_name_for("nul", "x"), "_nul");
+        assert_eq!(folder_name_for("COM1.old", "x"), "_COM1.old");
+        assert_eq!(folder_name_for("combo", "x"), "combo");
+        assert_eq!(folder_name_for(&"가".repeat(200), "x").chars().count(), 80);
+        for name in ["../../evil", "C:\\Windows", "tab\there"] {
+            let safe = folder_name_for(name, "x");
+            assert_eq!(Path::new(&safe).components().count(), 1, "{safe:?}");
+            assert!(!safe.contains(['/', '\\', ':', '\t']), "{safe:?}");
+        }
+    }
+
+    #[test]
+    fn pins_from_older_versions_are_still_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("category_overrides.json");
+        fs::write(
+            &path,
+            br#"{"ETS2": {"old_style": "sound", "new_style": ["truck", "sound"], "empty": []}}"#,
+        )
+        .unwrap();
+        let pins = load_overrides(&path);
+        let ets2 = &pins["ETS2"];
+        assert_eq!(ets2["old_style"], ["sound"]);
+        assert_eq!(ets2["new_style"], ["truck", "sound"]);
+        assert!(!ets2.contains_key("empty"));
+        // and what is written now reads back the same
+        save_json(&path, &pins).unwrap();
+        assert_eq!(load_overrides(&path), pins);
+        assert!(load_overrides(&tmp.path().join("missing.json")).is_empty());
+    }
+
+    #[test]
+    fn extraction_never_reuses_a_folder_with_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path();
+        assert_eq!(free_folder(parent, "mod").unwrap(), parent.join("mod"));
+        // an empty folder of that name is fine to use
+        fs::create_dir(parent.join("mod")).unwrap();
+        assert_eq!(free_folder(parent, "mod").unwrap(), parent.join("mod"));
+        // one with something in it is not, nor is a file of that name
+        fs::write(parent.join("mod").join("a.txt"), b"x").unwrap();
+        assert_eq!(free_folder(parent, "mod").unwrap(), parent.join("mod (2)"));
+        fs::write(parent.join("mod (2)"), b"a file").unwrap();
+        assert_eq!(free_folder(parent, "mod").unwrap(), parent.join("mod (3)"));
+    }
 }
