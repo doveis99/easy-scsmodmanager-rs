@@ -1,74 +1,81 @@
 # Easy SCS Mod Manager (Rust)
 
-Euro Truck Simulator 2와 American Truck Simulator의 모드와 로드 순서를 관리하는 프로그램입니다.
+**English** · [한국어](README.ko.md) · [简体中文](README.zh-CN.md)
 
-[Switch-Bros/easy-scsmodmanager](https://github.com/Switch-Bros/easy-scsmodmanager)(Python / PyQt6)를 Rust와 Tauri로 다시 쓴 것입니다. 원본과 같은 GPL-3.0-or-later 라이선스를 따릅니다.
+A mod and load-order manager for Euro Truck Simulator 2 and American Truck Simulator.
 
-## 실행
+It is a rewrite of [Switch-Bros/easy-scsmodmanager](https://github.com/Switch-Bros/easy-scsmodmanager) (Python / PyQt6) in Rust and Tauri, under the same GPL-3.0-or-later license.
 
-설치가 필요 없는 포터블 방식입니다.
+## Download and run
 
-```bash
-pnpm portable
-```
+Get `Easy-SCS-Mod-Manager-<version>-portable.zip` from the [releases](https://github.com/doveis99/easy-scsmodmanager-rs/releases), unpack it anywhere and run `easy-scsmodmanager.exe`. Nothing is installed.
 
-`dist-portable/Easy SCS Mod Manager/` 폴더가 만들어집니다. 그 안의 `easy-scsmodmanager.exe`를 실행하면 됩니다. 폴더는 어디로 옮겨도 됩니다.
+- Windows 10/11 (64-bit) only.
+- Settings, category pins, favourites, profile backups and caches are kept in the `data` folder next to the executable.
+- When started from a place it cannot write to (Program Files etc.), the app uses `%APPDATA%\easy-scsmodmanager-rs` instead.
+- The Microsoft Edge WebView2 runtime is required. Windows 11 ships with it.
+- The executable is not code-signed, so Windows SmartScreen may warn on the first start.
 
-- 설정, 분류 고정, 즐겨찾기, 프로필 백업, 창작마당 캐시는 모두 실행 파일 옆 `data` 폴더에 저장됩니다.
-- 쓸 수 없는 위치(Program Files 등)에서 실행하면 `%APPDATA%\easy-scsmodmanager-rs`를 대신 씁니다.
-- Microsoft Edge WebView2 런타임이 필요합니다. Windows 11에는 기본으로 들어 있습니다.
+## Languages
 
-## 기능
+The interface is available in English, Korean and Simplified Chinese. It follows the Windows language at first; choose another one under **Settings → Language**. The change applies at once.
 
-- **모드 목록**: `mod` 폴더와 Steam 창작마당의 모드를 스캔합니다. ZIP, HashFS v1/v2, AEM 아카이브와 압축을 푼 폴더를 읽습니다.
-- **자동 분류**: 모드가 선언한 분류에 더해 내용(맵 파일, 물리 정의)으로 분류를 바로잡습니다.
-- **수동 분류**: 모드별로 분류를 직접 고정할 수 있습니다. 여러 가지를 다루는 모드는 분류를 여러 개 지정하고 그중 하나를 대표로 고릅니다. 대표 분류가 로드 순서의 그룹을 정하고, 나머지는 분류 필터와 배지에 쓰입니다.
-- **잠긴 아카이브**: 파일 목록을 숨긴 아카이브는 카드에 `목록 숨김`으로 표시합니다. 게임 자체 아카이브의 경로 목록과 대조해 숨은 파일의 이름을 되찾고, 충돌 표시와 분류 판별에 씁니다. 경로 목록은 `data/cache/gamepaths`에 저장하고 게임이 바뀌면 다시 만듭니다.
-- **로드 순서**: 그룹별로 묶어 보여 주고, 끌어서 또는 `Alt+↑/↓`로 순서를 바꿉니다.
-- **자동 정렬**: 그룹별로 정렬하되, 같은 파일을 가진 모드끼리는 위아래 순서를 뒤집지 않습니다. 정렬해도 어느 모드가 파일을 이기는지는 바뀌지 않습니다.
-- **충돌 표시**: 같은 `def/` 파일을 위쪽 모드에 덮어써지는 모드를 표시하고 전체 보고서를 보여 줍니다.
-- **호환성 표시**: 모드가 선언한 호환 버전이 현재 게임 버전과 맞지 않으면 알려 줍니다.
-- **프로필 저장과 백업**: 저장할 때마다 프로필 폴더 전체를 백업하고, 백업에서 복원할 수 있습니다.
-- **창작마당 정보**: 이름이 없는 창작마당 모드의 제목과 미리보기를 Steam 공개 API에서 가져옵니다. 설정에서 끌 수 있습니다.
-- **공유**: 로드 순서를 파일로 내보내고 가져옵니다. 다른 사람의 `profile.sii`와 맵 콤보도 읽습니다. 파일 형식은 원본 앱과 같습니다.
-- **모드 관리**: 상세 보기, 즐겨찾기, 휴지통으로 삭제, 파일 위치 열기.
-- **아카이브 추출**: 모드 상세 보기의 `추출…` 버튼으로 모드의 `.scs` 아카이브를 고른 위치의 새 폴더에 풉니다. HashFS v2의 압축 텍스처는 `.dds` 파일로 복원합니다. 파일 목록을 숨긴 아카이브는 게임의 경로 목록, 파일 내용에 적힌 경로, 이름 규칙으로 파일 이름을 되찾아 원래 경로에 풀고, 끝내 이름을 모르는 파일은 `_unnamed` 폴더에 `해시.확장자`로 풉니다(확장자는 내용으로 추정). 게임 자체의 아카이브는 명령줄 `scsmm extract`로 풉니다.
-- **보기 상태 기억**: 마지막으로 쓴 게임과 프로필, 라이브러리의 정렬 기준과 분류·출처·즐겨찾기 필터를 다음 실행 때 그대로 되살립니다.
+## Features
 
-원본에 있지만 옮기지 않은 것: 온라인 공유 코드, 자동 업데이트, 영어·독일어 화면, Linux·macOS 패키징.
+- **Mod list**: scans the `mod` folder and the Steam Workshop. Reads ZIP, HashFS v1/v2 and AEM archives as well as unpacked folders.
+- **Automatic categories**: on top of what a mod declares, its content corrects the category: map files and physics definitions, the folders its definitions sit in, and the units they define. The units are read from a sample of the files, including scrambled (3nK) and binary definitions and the unnamed files of locked archives. Where the manifest declares nothing, or something its files do not back at all, the content decides; a less certain finding is only shown as a suggestion on the card. `scsmm classify` prints the reasoning for every mod.
+- **Manual categories**: pin a mod to a category yourself. A mod that covers several things can be given several categories, one of them as the main one. The main category decides the group in the load order; the others feed the category filter and the badges.
+- **Load order**: shown in groups; drag rows or press `Alt+↑/↓` to reorder.
+- **Auto sort**: sorts mods into their groups but never flips two mods that carry the same file, so sorting does not change which mod wins a file.
+- **Conflicts**: marks mods whose `def/` files are overridden by a mod above them, with a full report.
+- **Compatibility**: warns when the versions a mod declares do not match the game version.
+- **Locked archives**: archives that hide their file listing are marked `Hidden listing`. Their file names are recovered by matching against the path list of the game's own archives, and used for conflict detection and categories. The path list is cached in `data/cache/gamepaths` and rebuilt when the game changes.
+- **Extraction**: the `Extract…` button in a mod's details unpacks its `.scs` archive into a new folder. Packed HashFS v2 textures come out as `.dds`. For locked archives, names are recovered from the game's path list, from paths found inside the files and from naming conventions; whatever stays nameless is written to `_unnamed` as `<hash>.<extension>` (extension guessed from the content). The game's own archives can be unpacked with `scsmm extract` on the command line.
+- **Saving and backups**: every save backs up the whole profile folder first; backups can be restored.
+- **Workshop info**: titles and previews of Workshop mods without a name are fetched from Steam's public API. Can be switched off in the settings.
+- **Sharing**: export and import load orders as files; also reads someone else's `profile.sii` and map combos. The file formats are those of the original app.
+- **Mod management**: details, favourites, delete to the recycle bin, show in folder.
+- **Remembered view**: the last game and profile, and the library's sort order and filters, come back on the next start.
 
-## 구조
+Not ported from the original: online share codes, auto-update, the German interface, Linux and macOS packaging.
 
-| 경로 | 내용 |
+## Layout
+
+| Path | Content |
 |---|---|
-| `crates/scsmm-core` | 화면과 무관한 모든 로직: 아카이브 읽기, SII 파싱, 스캔, 분류, 로드 순서, 프로필, 공유 |
-| `crates/scsmm-cli` | 읽기 전용 명령줄 도구 `scsmm` |
-| `src-tauri` | Tauri 앱. 코어를 화면에 명령으로 노출합니다 |
-| `ui` | 화면 (TypeScript, Vite) |
-| `scripts` | 포터블 빌드와 정리 스크립트 |
+| `crates/scsmm-core` | All logic that needs no window: archive reading, SII parsing, scanning, categories, load order, profiles, sharing |
+| `crates/scsmm-cli` | Read-only command-line tool `scsmm` |
+| `src-tauri` | The Tauri app; exposes the core to the interface as commands |
+| `ui` | The interface (TypeScript, Vite) |
+| `ui/src/locales` | Interface texts, one file per language |
+| `scripts` | Portable build and clean-up scripts |
 
-## 개발
+## Development
 
-Rust, Node.js, pnpm이 필요합니다.
+Rust, Node.js and pnpm are required.
 
 ```bash
-pnpm install          # 처음 한 번
-pnpm tauri dev        # 개발 모드로 실행
+pnpm install          # once
+pnpm tauri dev        # run in development mode
 cargo test --workspace
-pnpm portable         # 포터블 폴더 만들기
-pnpm clean            # target 폴더 정리 (릴리스 빌드 캐시는 남김)
-pnpm clean --all      # target 폴더 전체 삭제
+pnpm portable         # build the portable folder (dist-portable/)
+pnpm clean            # trim the target folder (keeps the release build cache)
+pnpm clean --all      # delete the whole target folder
 ```
 
-명령줄 도구는 프로필을 건드리지 않고 스캔 결과와 로드 순서를 보여 줍니다.
+The command-line tool shows scan results and the load order without touching a profile.
 
 ```bash
 cargo run -p scsmm-cli -- installs
 cargo run -p scsmm-cli -- scan --game ets2
 cargo run -p scsmm-cli -- order --game ets2
-cargo run -p scsmm-cli -- extract <아카이브.scs> <빈 폴더>
+cargo run -p scsmm-cli -- extract <archive.scs> <empty folder>
 ```
 
-## 라이선스
+### Adding a language
 
-GPL-3.0-or-later. 전문은 [LICENSE](LICENSE)에 있습니다.
+Korean (`ui/src/locales/ko.ts`) is the source. Copy it, translate the values, then register the new file in `ui/src/i18n.ts` (`Lang`, `MESSAGES`, `LOCALE`, `LANGS`) and in `Settings::normalize_language` in `crates/scsmm-core/src/settings.rs`. A missing key fails the build.
+
+## License
+
+GPL-3.0-or-later. The full text is in [LICENSE](LICENSE).

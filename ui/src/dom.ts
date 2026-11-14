@@ -1,5 +1,7 @@
 // Small DOM helpers and the one modal dialog the app uses.
 
+import { t } from "./i18n";
+
 export function $<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
   if (!el) throw new Error(`missing element #${id}`);
@@ -133,7 +135,7 @@ export function confirmModal(title: string, body: string, okLabel: string, dange
     body,
     dismiss: false,
     buttons: [
-      { label: "취소", value: false },
+      { label: t("common.cancel"), value: false },
       { label: okLabel, value: true, kind: danger ? "danger" : "primary" },
     ],
   });
@@ -147,6 +149,6 @@ export function infoModal(title: string, body: string): Promise<void> {
     dismiss: undefined,
     wide: true,
     pre: true,
-    buttons: [{ label: "닫기", value: undefined, kind: "primary" }],
+    buttons: [{ label: t("common.close"), value: undefined, kind: "primary" }],
   });
 }

@@ -1,6 +1,6 @@
 <!doctype html>
 <!-- the inline background paints before the stylesheet arrives -->
-<html lang="ko" style="background: #14171c">
+<html lang="en" style="background: #14171c">
   <head>
     <meta charset="UTF-8" />
     <meta name="color-scheme" content="dark" />
@@ -8,53 +8,56 @@
     <title>Easy SCS Mod Manager</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
+  <!-- Texts are filled in at start from the language files (ui/src/locales):
+       data-i18n names the message for the element's text, the -placeholder,
+       -aria and -title variants the one for that attribute. -->
   <body>
     <header class="topbar">
       <div class="brand">Easy SCS Mod Manager</div>
-      <div class="seg" id="game-switch" role="tablist" aria-label="게임"></div>
+      <div class="seg" id="game-switch" role="tablist" data-i18n-aria="top.game"></div>
       <label class="field">
-        <span>프로필</span>
+        <span data-i18n="top.profile"></span>
         <select id="profile-select"></select>
       </label>
-      <button id="open-backups" class="btn">백업</button>
+      <button id="open-backups" class="btn" data-i18n="top.backups"></button>
       <div class="spacer"></div>
       <span class="muted" id="game-version"></span>
-      <button id="open-settings" class="btn">설정</button>
-      <button id="rescan" class="btn">다시 스캔</button>
+      <button id="open-settings" class="btn" data-i18n="top.settings"></button>
+      <button id="rescan" class="btn" data-i18n="top.rescan"></button>
     </header>
 
     <main class="panes">
-      <section class="pane library" aria-label="모드 라이브러리">
+      <section class="pane library" data-i18n-aria="lib.aria">
         <div class="toolbar">
-          <input id="search" type="search" placeholder="이름, 제작자, 분류 검색" />
-          <select id="filter-category" aria-label="분류"></select>
-          <select id="filter-source" aria-label="출처">
-            <option value="">모든 출처</option>
-            <option value="local">로컬</option>
-            <option value="workshop">창작마당</option>
+          <input id="search" type="search" data-i18n-placeholder="lib.search" />
+          <select id="filter-category" data-i18n-aria="lib.category"></select>
+          <select id="filter-source" data-i18n-aria="lib.source">
+            <option value="" data-i18n="lib.allSources"></option>
+            <option value="local" data-i18n="lib.local"></option>
+            <option value="workshop" data-i18n="lib.workshop"></option>
           </select>
-          <select id="sort" aria-label="정렬">
-            <option value="name">이름순</option>
-            <option value="date">설치일순</option>
+          <select id="sort" data-i18n-aria="lib.sort">
+            <option value="name" data-i18n="lib.sortName"></option>
+            <option value="date" data-i18n="lib.sortDate"></option>
           </select>
-          <label class="check"><input type="checkbox" id="filter-favorites" /> 즐겨찾기</label>
+          <label class="check"><input type="checkbox" id="filter-favorites" /> <span data-i18n="lib.favorites"></span></label>
         </div>
         <div class="count muted" id="library-count"></div>
         <div class="grid" id="grid"></div>
       </section>
 
-      <section class="pane order" aria-label="활성 모드 로드 순서">
+      <section class="pane order" data-i18n-aria="order.aria">
         <div class="toolbar">
-          <strong class="pane-title">로드 순서</strong>
+          <strong class="pane-title" data-i18n="order.title"></strong>
           <div class="spacer"></div>
-          <button id="open-share" class="btn">공유</button>
-          <button id="show-conflicts" class="btn" hidden>충돌 보기</button>
-          <button id="auto-sort" class="btn">자동 정렬</button>
-          <button id="revert" class="btn" disabled>되돌리기</button>
-          <button id="save" class="btn primary" disabled>저장</button>
+          <button id="open-share" class="btn" data-i18n="order.share"></button>
+          <button id="show-conflicts" class="btn" data-i18n="order.conflicts" hidden></button>
+          <button id="auto-sort" class="btn" data-i18n="order.autoSort"></button>
+          <button id="revert" class="btn" data-i18n="order.revert" disabled></button>
+          <button id="save" class="btn primary" data-i18n="common.save" disabled></button>
         </div>
         <div class="count" id="order-summary"></div>
-        <div class="hint muted">위쪽일수록 나중에 로드되어 우선순위가 높습니다. 끌거나 Alt+↑/↓로 순서를 바꿀 수 있습니다.</div>
+        <div class="hint muted" data-i18n="order.hint"></div>
         <div class="rows" id="rows"></div>
       </section>
     </main>

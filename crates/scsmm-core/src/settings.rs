@@ -82,6 +82,8 @@ pub struct Settings {
     /// order (matched case-insensitively against name and display name).
     pub map_base_names: Vec<String>,
     pub last_game: Option<Game>,
+    /// Interface language (`ko`, `en`, `zh`); `None` follows the system.
+    pub language: Option<String>,
     /// Sort order and filters of the mod library.
     pub view: ViewSettings,
     pub ets2: GameSettings,
@@ -95,6 +97,7 @@ impl Default for Settings {
             backup_keep: 10,
             map_base_names: DEFAULT_MAP_BASE_NAMES.iter().map(|s| s.to_string()).collect(),
             last_game: None,
+            language: None,
             view: ViewSettings::default(),
             ets2: GameSettings::default(),
             ats: GameSettings::default(),
@@ -113,6 +116,7 @@ impl Settings {
             .and_then(|raw| serde_json::from_slice(&raw).ok())
             .unwrap_or_default();
         settings.view.normalize();
+        settings.normalize_language();
         settings
     }
 
@@ -141,9 +145,17 @@ impl Settings {
         }
     }
 
+    /// A language this version has no texts for means "follow the system".
+    pub fn normalize_language(&mut self) {
+        if !matches!(self.language.as_deref(), Some("ko" | "en" | "zh")) {
+            self.language = None;
+        }
+    }
+
     /// Tidy user input: trimmed, non-empty, de-duplicated fragments; an
     /// empty list falls back to the defaults.
     pub fn normalize(&mut self) {
+        self.normalize_language();
         let mut names: Vec<String> = Vec::new();
         for name in &self.map_base_names {
             let name = name.trim();
@@ -248,6 +260,22 @@ mod tests {
         let view = Settings::load(&path).view;
         assert_eq!((view.sort.as_str(), view.category.as_str(), view.source.as_str()), ("name", "", ""));
         assert!(view.favorites);
+    }
+
+    #[test]
+    fn language_is_kept_and_unknown_ones_follow_the_system() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        assert_eq!(Settings::load(&path).language, None);
+        let mut s = Settings::default();
+        s.language = Some("zh".into());
+        s.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).language.as_deref(), Some("zh"));
+        fs::write(&path, br#"{"language": "tlh"}"#).unwrap();
+        assert_eq!(Settings::load(&path).language, None);
+        s.language = Some("EN".into());
+        s.normalize();
+        assert_eq!(s.language, None);
     }
 
     #[test]

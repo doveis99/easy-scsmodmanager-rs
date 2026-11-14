@@ -16,6 +16,12 @@
   font-size: 14px;
 }
 
+/* Chinese text must not fall back to a Korean font: the same characters
+   are drawn in different regional forms. */
+:root:lang(zh) {
+  font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -365,6 +371,21 @@ input[type="search"] {
 .badge.keep {
   color: var(--muted);
   cursor: help;
+}
+
+/* a category the content analysis offers; never applied by itself */
+.badge.suggest {
+  color: var(--accent);
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+  cursor: help;
+}
+
+.form-note.suggest {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .badge.err {

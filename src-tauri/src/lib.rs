@@ -39,6 +39,18 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// An error the interface shows in its own language: `@code` followed by
+/// tab-separated values. The texts live in the UI's language files under
+/// `err.<code>`, with `{0}`, `{1}`... standing for the values.
+fn coded(code: &str, values: &[&str]) -> String {
+    let mut out = format!("@{code}");
+    for value in values {
+        out.push('\t');
+        out.push_str(value);
+    }
+    out
+}
+
 #[derive(Default)]
 struct AppState {
     inner: Mutex<Inner>,
@@ -266,7 +278,7 @@ fn install_for(game: Game, settings: &Settings) -> CmdResult<(GameInstall, Vec<P
     let libs = steam::discover_steam_libraries();
     let install = settings
         .resolve_install(game, &libs)
-        .ok_or_else(|| format!("{} 데이터 폴더를 찾지 못했습니다.", game.short_name()))?;
+        .ok_or_else(|| coded("no_install", &[game.short_name()]))?;
     Ok((install, libs))
 }
 
@@ -304,6 +316,14 @@ struct ModDto {
     category_pins: Vec<String>,
     /// What the categories would be without pins.
     auto_categories: Vec<String>,
+    /// The automatic categories come from the mod's files, which overrule
+    /// what its manifest declares (or fill in for an empty one).
+    judged_from_content: bool,
+    /// A category the files point to without being sure enough to overrule
+    /// the manifest: offered to the user, never applied by itself.
+    suggested_category: Option<&'static str>,
+    /// What the analysis saw in the files, the strongest signals first.
+    evidence: Vec<scsmm_core::classify::Signal>,
     /// Files the archive holds without listing them (a locked archive),
     /// and how many of those could be named all the same.
     hidden_files: usize,
@@ -463,6 +483,11 @@ fn build_dtos(inner: &mut Inner, game: Game) -> Vec<ModDto> {
             };
             let category_pins = pins.and_then(|o| o.get(&id)).cloned().unwrap_or_default();
             let categories = m.effective_categories(&category_pins);
+            let auto_categories = m.effective_categories(&[]);
+            // a map descriptor or the physics file may have decided instead
+            let judged_from_content = m
+                .verdict()
+                .is_some_and(|v| v.applied && auto_categories.first().map(String::as_str) == Some(v.category));
             ModDto {
                 group_token: group_token(&id, &display_name, &categories[0], &settings.map_base_names),
                 path: m.path.display().to_string(),
@@ -479,7 +504,10 @@ fn build_dtos(inner: &mut Inner, game: Game) -> Vec<ModDto> {
                 version: manifest.package_version,
                 categories,
                 manifest_categories: manifest.categories,
-                auto_categories: m.effective_categories(&[]),
+                auto_categories,
+                judged_from_content,
+                suggested_category: m.suggested_category(&category_pins),
+                evidence: m.evidence.signals.clone(),
                 category_pins,
                 hidden_files: m.hidden.len(),
                 hidden_named: m.hidden_named,
@@ -537,7 +565,7 @@ fn known_profile(game: Game, profile_path: &str, settings: &Settings) -> CmdResu
     profile::discover_profiles(&install)
         .into_iter()
         .find(|p| p.as_path() == Path::new(profile_path))
-        .ok_or_else(|| "알 수 없는 프로필 경로입니다.".to_string())
+        .ok_or_else(|| coded("unknown_profile", &[]))
 }
 
 // ------------------------------------------------------------------- //
@@ -606,14 +634,10 @@ fn save_settings(mut settings: Settings, state: State<'_, AppState>) -> CmdResul
     settings.backup_keep = settings.backup_keep.min(1000);
     for game in Game::ALL {
         let gs = settings.game(game);
-        for (label, path) in [("문서 폴더", &gs.documents_dir), ("창작마당 폴더", &gs.workshop_dir)] {
+        for (code, path) in [("docs_missing", &gs.documents_dir), ("workshop_missing", &gs.workshop_dir)] {
             if let Some(p) = path {
                 if !p.is_dir() {
-                    return Err(format!(
-                        "{} {label}가 존재하지 않습니다: {}",
-                        game.short_name(),
-                        p.display()
-                    ));
+                    return Err(coded(code, &[game.short_name(), &p.display().to_string()]));
                 }
             }
         }
@@ -927,14 +951,14 @@ fn delete_mods(game: String, ids: Vec<String>, state: State<'_, AppState>) -> Cm
         let scanned = inner.scans.get(&game).unwrap_or(&empty);
         for id in ids {
             let Some(m) = scanned.iter().find(|m| m.mod_name() == id) else {
-                result.failed.push(DeleteFailure { id, error: "스캔 목록에 없는 모드입니다.".into() });
+                result.failed.push(DeleteFailure { id, error: coded("not_scanned", &[]) });
                 continue;
             };
             if m.workshop_id().is_some() {
                 result.skipped_workshop += 1;
             } else if m.path.parent() != Some(mod_dir.as_path()) {
                 // only direct children of the game's own mod folder
-                result.failed.push(DeleteFailure { id, error: "모드 폴더 밖의 경로입니다.".into() });
+                result.failed.push(DeleteFailure { id, error: coded("outside_mod_dir", &[]) });
             } else {
                 targets.push((id, m.path.clone()));
             }
@@ -962,7 +986,7 @@ fn scanned_path(state: &State<'_, AppState>, game: Game, id: &str) -> CmdResult<
         .get(&game)
         .and_then(|mods| mods.iter().find(|m| m.mod_name() == id))
         .map(|m| (m.path.clone(), m.workshop_id()))
-        .ok_or_else(|| "스캔 목록에 없는 모드입니다.".to_string())
+        .ok_or_else(|| coded("not_scanned", &[]))
 }
 
 /// Show the mod's file in the system file manager.
@@ -970,7 +994,7 @@ fn scanned_path(state: &State<'_, AppState>, game: Game, id: &str) -> CmdResult<
 fn reveal_mod(game: String, id: String, state: State<'_, AppState>) -> CmdResult<()> {
     let (path, _) = scanned_path(&state, parse_game(&game)?, &id)?;
     if !path.exists() {
-        return Err("파일이 더 이상 존재하지 않습니다.".into());
+        return Err(coded("file_gone", &[]));
     }
     #[cfg(windows)]
     {
@@ -1052,7 +1076,7 @@ fn free_folder(parent: &Path, name: &str) -> CmdResult<PathBuf> {
             return Ok(candidate);
         }
     }
-    Err("추출할 폴더 이름을 정하지 못했습니다.".into())
+    Err(coded("no_folder_name", &[]))
 }
 
 /// Clears the busy flag however the extraction ends.
@@ -1079,18 +1103,18 @@ fn extract_mod(
     let (path, _) = scanned_path(&state, game, &id)?;
     let parent = Path::new(&dest_parent);
     if !parent.is_absolute() || !parent.is_dir() {
-        return Err("추출할 위치가 존재하는 폴더가 아닙니다.".into());
+        return Err(coded("bad_dest", &[]));
     }
     if !path.is_file() {
-        return Err("압축을 푼 폴더 형태의 모드는 추출할 필요가 없습니다. '파일 위치 열기'로 바로 볼 수 있습니다.".into());
+        return Err(coded("is_folder_mod", &[]));
     }
     match scsmm_core::scs::detect_format(&path).map_err(err)? {
         ScsFormat::Zip | ScsFormat::HashfsV1 | ScsFormat::HashfsV2 => {}
-        _ => return Err("이 형식의 아카이브는 추출할 수 없습니다.".into()),
+        _ => return Err(coded("not_extractable", &[])),
     }
 
     if state.extract_busy.swap(true, Ordering::SeqCst) {
-        return Err("이미 다른 추출이 진행 중입니다.".into());
+        return Err(coded("extract_busy", &[]));
     }
     let _busy = BusyGuard(&state.extract_busy);
     state.extract_cancel.store(false, Ordering::SeqCst);
@@ -1148,7 +1172,7 @@ fn open_extracted(state: State<'_, AppState>) -> CmdResult<()> {
         .map_err(err)?
         .clone()
         .filter(|d| d.is_dir())
-        .ok_or("추출한 폴더가 더 이상 존재하지 않습니다.")?;
+        .ok_or_else(|| coded("extract_gone", &[]))?;
     #[cfg(windows)]
     std::process::Command::new("explorer.exe").arg(&dest).spawn().map_err(err)?;
     #[cfg(target_os = "macos")]
@@ -1163,7 +1187,7 @@ fn open_extracted(state: State<'_, AppState>) -> CmdResult<()> {
 fn open_workshop_page(game: String, id: String, state: State<'_, AppState>) -> CmdResult<()> {
     let (_, workshop_id) = scanned_path(&state, parse_game(&game)?, &id)?;
     // the URL is built here from a numeric id, never taken from the UI
-    open_url(&workshop_url(&workshop_id.ok_or("창작마당 모드가 아닙니다.")?))
+    open_url(&workshop_url(&workshop_id.ok_or_else(|| coded("not_workshop", &[]))?))
 }
 
 /// Hand a URL to the default browser. Callers only pass workshop URLs
@@ -1440,7 +1464,7 @@ fn write_share_file(path: &str, text: &str) -> CmdResult<()> {
     let path = Path::new(path);
     let is_json = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"));
     if !is_json || !path.parent().is_some_and(|p| p.is_dir()) {
-        return Err("공유 파일은 기존 폴더 안의 .json 파일로만 저장할 수 있습니다.".into());
+        return Err(coded("share_json_only", &[]));
     }
     fs::write(path, text).map_err(err)
 }
@@ -1448,7 +1472,7 @@ fn write_share_file(path: &str, text: &str) -> CmdResult<()> {
 fn read_share_file(path: &Path) -> CmdResult<Vec<u8>> {
     let size = fs::metadata(path).map_err(err)?.len();
     if size > MAX_SHARE_FILE_BYTES {
-        return Err("파일이 너무 큽니다. 공유 파일이 아닌 것 같습니다.".into());
+        return Err(coded("share_too_big", &[]));
     }
     fs::read(path).map_err(err)
 }
@@ -1519,11 +1543,7 @@ fn preview_share(game: String, path: String, state: State<'_, AppState>) -> CmdR
         let raw = read_share_file(path)?;
         let share = ShareList::parse(&String::from_utf8_lossy(&raw)).map_err(err)?;
         if share.game != game {
-            return Err(format!(
-                "이 공유 파일은 {}용입니다. {}로 전환한 뒤 가져오세요.",
-                share.game.short_name(),
-                share.game.short_name()
-            ));
+            return Err(coded("share_wrong_game", &[share.game.short_name()]));
         }
         ("modshare", share)
     };
@@ -1562,7 +1582,7 @@ fn export_map_combo(game: String, items: Vec<ActiveMod>, path: String, state: St
             .collect()
     };
     if combo.is_empty() {
-        return Err("로드 순서의 맵 그룹에 모드가 없습니다.".into());
+        return Err(coded("no_maps", &[]));
     }
     write_share_file(&path, &share::serialize_map_combo(&combo))?;
     Ok(combo.len())
@@ -1609,7 +1629,7 @@ fn preview_map_combo(game: String, items: Vec<ActiveMod>, path: String, state: S
 #[tauri::command]
 fn open_workshop_item(workshop_id: String) -> CmdResult<()> {
     if !workshop_api::is_workshop_id(&workshop_id) {
-        return Err("잘못된 창작마당 ID입니다.".into());
+        return Err(coded("bad_workshop_id", &[]));
     }
     open_url(&workshop_url(&workshop_id))
 }
@@ -1680,6 +1700,12 @@ mod tests {
             assert_eq!(Path::new(&safe).components().count(), 1, "{safe:?}");
             assert!(!safe.contains(['/', '\\', ':', '\t']), "{safe:?}");
         }
+    }
+
+    #[test]
+    fn coded_errors_carry_their_values() {
+        assert_eq!(coded("unknown_profile", &[]), "@unknown_profile");
+        assert_eq!(coded("docs_missing", &["ETS2", "X:\\gone"]), "@docs_missing\tETS2\tX:\\gone");
     }
 
     #[test]

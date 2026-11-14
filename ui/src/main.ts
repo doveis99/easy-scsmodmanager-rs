@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open as pickOpen, save as pickSave } from "@tauri-apps/plugin-dialog";
 import { $, confirmModal, dismissDialog, h, infoModal, openDialog } from "./dom";
+import { LANGS, applyStatic, hasKey, locale, num, resolveLang, setLang, t } from "./i18n";
 
 // ---------------------------------------------------------------- types
 
@@ -14,6 +15,15 @@ interface InstallInfo {
   workshop_dir: string | null;
   version: string | null;
   manual: boolean;
+}
+
+/** One thing the content analysis saw: files below a path pattern, or
+ *  files read that define a unit class. */
+interface Signal {
+  label: string;
+  key: string;
+  count: number;
+  from_content: boolean;
 }
 
 interface Mod {
@@ -32,6 +42,12 @@ interface Mod {
   category_pins: string[];
   /** What the categories would be without pins. */
   auto_categories: string[];
+  /** The automatic categories come from the files, not from the manifest. */
+  judged_from_content: boolean;
+  /** A category the files point to, offered but never applied by itself. */
+  suggested_category: string | null;
+  /** What the analysis saw in the files, the strongest signals first. */
+  evidence: Signal[];
   /** Files a locked archive holds without listing them, and how many of
    *  those could be named all the same. */
   hidden_files: number;
@@ -103,6 +119,8 @@ interface Settings {
   backup_keep: number;
   map_base_names: string[];
   last_game: GameId | null;
+  /** Interface language (`ko`, `en`, `zh`); null follows the system. */
+  language: string | null;
   view: ViewSettings;
   ets2: GameSettings;
   ats: GameSettings;
@@ -172,44 +190,15 @@ interface Constants {
 
 // --------------------------------------------------------------- labels
 
-const CATEGORY_LABEL: Record<string, string> = {
-  truck: "트럭",
-  trailer: "트레일러",
-  interior: "인테리어",
-  tuning_parts: "튜닝 파츠",
-  ai_traffic: "AI 교통",
-  sound: "사운드",
-  paint_job: "도색",
-  cargo_pack: "화물",
-  map: "맵",
-  ui: "UI",
-  weather_setup: "날씨",
-  physics: "물리",
-  graphics: "그래픽",
-  models: "모델",
-  movers: "무버",
-  walkers: "보행자",
-  prefabs: "프리팹",
-  other: "기타",
+/** A token the game may add later simply shows as it is. */
+const catLabel = (token: string) => {
+  const key = `cat.${token}`;
+  return hasKey(key) ? t(key) : token;
 };
-
-const GROUP_LABEL: Record<string, string> = {
-  map_base: "맵 기반 · 배경 · 로딩 화면",
-  graphics_weather: "그래픽 · 날씨",
-  sound: "사운드",
-  physics: "물리",
-  ui_other: "UI · 기타",
-  tuning_interior: "튜닝 · 인테리어",
-  ai_traffic: "AI 교통",
-  cargo: "화물",
-  paint_jobs: "도색",
-  trailers: "트레일러",
-  trucks: "트럭",
-  maps: "맵",
+const groupLabel = (id: string) => {
+  const key = `group.${id}`;
+  return hasKey(key) ? t(key) : id;
 };
-
-const catLabel = (token: string) => CATEGORY_LABEL[token] ?? token;
-const groupLabel = (id: string) => GROUP_LABEL[id] ?? id;
 
 // ---------------------------------------------------------------- state
 
@@ -240,8 +229,17 @@ function setStatus(message: string, kind: "info" | "error" | "ok" = "info") {
   el.dataset.kind = kind;
 }
 
+/** Errors of the backend arrive as "@code<TAB>value..." so that they can
+ *  be shown in the interface language; anything else is shown as it is. */
+function backendText(raw: string): string {
+  if (!raw.startsWith("@")) return raw;
+  const [code, ...values] = raw.slice(1).split("\t");
+  const key = `err.${code}`;
+  return hasKey(key) ? t(key, Object.fromEntries(values.map((v, i) => [String(i), v]))) : raw;
+}
+
 function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+  return backendText(e instanceof Error ? e.message : String(e));
 }
 
 // -------------------------------------------------------------- loading
@@ -263,7 +261,7 @@ async function loadGame(game: GameId) {
   renderGameSwitch();
   renderProfileSelect();
   renderAll();
-  setStatus("모드를 스캔하는 중…");
+  setStatus(t("status.scanning"));
   const started = performance.now();
   try {
     const [mods, profiles] = await Promise.all([
@@ -288,8 +286,8 @@ async function loadGame(game: GameId) {
     const unreadable = mods.filter((m) => m.error).length;
     const ms = Math.round(performance.now() - started);
     setStatus(
-      `모드 ${mods.length}개를 ${ms}ms에 스캔했습니다.` +
-        (unreadable ? ` 읽지 못한 모드 ${unreadable}개.` : ""),
+      t("status.scanned", { n: mods.length, ms }) +
+        (unreadable ? t("status.unreadable", { n: unreadable }) : ""),
       "ok",
     );
     void refreshWorkshop();
@@ -319,7 +317,7 @@ async function refreshWorkshop() {
     // cards that had no icon before may have a preview now
     for (const [key, url] of icons) if (url === null) icons.delete(key);
     renderLibrary();
-    setStatus(`창작마당에서 이름 ${r.titles}개, 미리보기 ${r.previews}개를 받아 왔습니다.`, "ok");
+    setStatus(t("status.workshopFetched", { titles: r.titles, previews: r.previews }), "ok");
   } catch (e) {
     console.warn("workshop lookup failed:", errorText(e));
   }
@@ -386,14 +384,14 @@ function gameVersion(): string | null {
 function conflictLines(name: string, limit?: number): string[] {
   const lines: string[] = [];
   const more = (rest: number) => {
-    if (rest > 0) lines.push(`  … 외 ${rest}개`);
+    if (rest > 0) lines.push(t("common.more", { n: rest }));
   };
   const override = state.conflicts.overrides[name];
   if (override) {
     lines.push(
       override.severity === "full"
-        ? `겹치는 def 파일 ${override.shared_total}개가 모두 위쪽 모드에 덮어써집니다.`
-        : `겹치는 def 파일 ${override.shared_total}개 중 ${override.lost.length}개가 위쪽 모드에 덮어써집니다.`,
+        ? t("conflict.allLost", { total: override.shared_total })
+        : t("conflict.someLost", { total: override.shared_total, lost: override.lost.length }),
     );
     const shown = limit === undefined ? override.lost : override.lost.slice(0, limit);
     for (const l of shown) lines.push(`  ${l.file} → ${displayNameOf(l.winner)}`);
@@ -403,11 +401,11 @@ function conflictLines(name: string, limit?: number): string[] {
   if (frequent) {
     lines.push(
       override
-        ? "여러 모드가 흔히 함께 수정하는 파일도 있습니다 (충돌 아님)."
-        : "여러 모드가 흔히 함께 수정하는 파일입니다 (충돌 아님).",
+        ? t("conflict.frequentToo")
+        : t("conflict.frequentOnly"),
     );
     const shown = limit === undefined ? frequent : frequent.slice(0, limit);
-    for (const f of shown) lines.push(`  ${f.file} (모드 ${f.owners}개)`);
+    for (const f of shown) lines.push(t("conflict.owners", { file: f.file, n: f.owners }));
     more(frequent.length - shown.length);
   }
   return lines;
@@ -421,9 +419,9 @@ function conflictReport(): string {
   const profile = state.profiles.find((p) => p.path === state.profilePath)?.profile_name ?? "";
   const version = gameVersion();
   const head = [
-    `게임: ${state.game.toUpperCase()}${version ? ` ${version}` : ""}   프로필: ${profile}`,
-    `덮어써지는 모드 ${Object.keys(state.conflicts.overrides).length}개`,
-    "아래쪽 모드의 파일이 위쪽 모드에 가려진다는 안내이며 오류가 아닙니다. 맵 모드에서는 의도된 경우가 많습니다.",
+    t("conflict.head", { game: state.game.toUpperCase() + (version ? ` ${version}` : ""), profile }),
+    t("conflict.count", { n: Object.keys(state.conflicts.overrides).length }),
+    t("conflict.note"),
     "=".repeat(44),
   ];
   const blocks = affected.map((a) => [a.display_name || a.name, ...conflictLines(a.name)].join("\n"));
@@ -435,7 +433,7 @@ function conflictGlyph(item: ActiveItem): HTMLElement | null {
   const frequent = state.conflicts.frequent[item.name];
   if (!override && !frequent) return null;
   const kind = override ? override.severity : "frequent";
-  const label = { full: "전부 덮어써짐", partial: "일부 덮어써짐", frequent: "흔히 공유되는 파일" }[kind];
+  const label = t(`conflict.${kind}`);
   return h(
     "button",
     {
@@ -450,7 +448,7 @@ function conflictGlyph(item: ActiveItem): HTMLElement | null {
 
 function compatTitle(versions: string[]): string {
   const game = gameVersion();
-  return `이 모드가 선언한 호환 버전: ${versions.join(", ")}` + (game ? `\n현재 게임 버전: ${game}` : "");
+  return t("compat.declared", { versions: versions.join(", ") }) + (game ? t("compat.current", { version: game }) : "");
 }
 
 // ------------------------------------------------------------ rendering
@@ -472,7 +470,7 @@ function renderGameSwitch() {
           role: "tab",
           "aria-selected": String(state.game === g),
           disabled: !install,
-          title: install ? install.documents_dir : "설치를 찾지 못했습니다",
+          title: install ? install.documents_dir : t("game.notFound"),
           onclick: () => void switchGame(g),
         },
         g.toUpperCase(),
@@ -480,7 +478,7 @@ function renderGameSwitch() {
     }),
   );
   const current = state.installs.find((i) => i.game === state.game);
-  $("game-version").textContent = current?.version ? `게임 버전 ${current.version}` : "";
+  $("game-version").textContent = current?.version ? t("game.version", { version: current.version }) : "";
 }
 
 async function switchGame(game: GameId) {
@@ -491,9 +489,9 @@ async function switchGame(game: GameId) {
 
 function confirmDiscard(): Promise<boolean> {
   return confirmModal(
-    "저장하지 않은 변경 사항",
-    "로드 순서를 바꿨지만 아직 저장하지 않았습니다. 변경 사항을 버릴까요?",
-    "버리기",
+    t("discard.title"),
+    t("discard.body"),
+    t("discard.ok"),
   );
 }
 
@@ -504,12 +502,12 @@ function renderProfileSelect() {
       h(
         "option",
         { value: p.path, disabled: !!p.error, selected: p.path === state.profilePath },
-        p.error ? `${p.profile_name} (읽기 실패)` : `${p.profile_name} · 활성 ${p.active_count}개`,
+        p.error ? t("profile.unreadable", { name: p.profile_name }) : t("profile.active", { name: p.profile_name, n: p.active_count }),
       ),
     ),
   );
   if (state.profiles.length === 0) {
-    select.append(h("option", { value: "" }, "프로필 없음"));
+    select.append(h("option", { value: "" }, t("profile.none")));
   }
   select.disabled = state.profiles.length === 0;
 }
@@ -530,7 +528,7 @@ function filteredMods(): Mod[] {
   if (sort === "date") {
     out.sort((a, b) => b.installed_at - a.installed_at);
   } else {
-    out.sort((a, b) => a.display_name.localeCompare(b.display_name, "ko"));
+    out.sort((a, b) => a.display_name.localeCompare(b.display_name, locale()));
   }
   return out;
 }
@@ -573,13 +571,13 @@ function renderLibrary() {
   const active = activeNames();
   $("library-count").textContent =
     mods.length === state.mods.length
-      ? `모드 ${state.mods.length}개`
-      : `모드 ${state.mods.length}개 중 ${mods.length}개 표시`;
+      ? t("lib.count", { n: state.mods.length })
+      : t("lib.countShown", { total: state.mods.length, shown: mods.length });
 
   const grid = $("grid");
   if (mods.length === 0) {
     grid.replaceChildren(
-      h("div", { class: "empty" }, state.mods.length ? "조건에 맞는 모드가 없습니다." : "모드가 없습니다."),
+      h("div", { class: "empty" }, state.mods.length ? t("lib.noMatch") : t("lib.empty")),
     );
     return;
   }
@@ -590,11 +588,17 @@ function renderLibrary() {
 const MULTI_PINS = "__multi";
 const EDIT_PINS = "__edit";
 
+/** The strongest things the content analysis saw, as one line. */
+function evidenceText(m: Mod): string {
+  return m.evidence
+    .slice(0, 5)
+    .map((s) => `${s.from_content ? t("evidence.unit", { key: s.key }) : s.key} ×${num(s.count)}`)
+    .join(", ");
+}
+
 function lockedTitle(m: Mod): string {
   return (
-    `파일 목록을 숨긴 아카이브입니다. 숨은 파일 ${m.hidden_files.toLocaleString("ko-KR")}개 중 ` +
-    `${m.hidden_named.toLocaleString("ko-KR")}개의 이름을 확인했습니다.\n` +
-    "내용으로 분류를 판별하기 어려우므로, 자동 분류가 맞지 않으면 분류를 직접 지정하세요."
+    t("locked.title", { hidden: num(m.hidden_files), named: num(m.hidden_named) })
   );
 }
 
@@ -613,8 +617,8 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
     {
       class: "cat-select",
       // the control is narrow: the full pinned list goes into the tooltip
-      title: pins.length ? `수동 분류: ${pins.map(catLabel).join(" + ")} (대표: ${catLabel(pins[0])})` : "분류 변경",
-      "aria-label": "분류 변경",
+      title: pins.length ? t("pin.manualTitle", { list: pins.map(catLabel).join(" + "), main: catLabel(pins[0]) }) : t("pin.change"),
+      "aria-label": t("pin.change"),
       onchange: (ev: Event) => {
         const select = ev.target as HTMLSelectElement;
         if (select.value === EDIT_PINS) {
@@ -626,12 +630,12 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
         }
       },
     },
-    h("option", { value: "", selected: current === "" }, "자동 분류"),
+    h("option", { value: "", selected: current === "" }, t("pin.auto")),
     pins.length > 1
-      ? h("option", { value: MULTI_PINS, selected: true }, `수동: ${pins.map(catLabel).join(" + ")}`)
+      ? h("option", { value: MULTI_PINS, selected: true }, t("pin.manual", { list: pins.map(catLabel).join(" + ") }))
       : null,
     ...state.constants.categories.map((c) => h("option", { value: c, selected: current === c }, catLabel(c))),
-    h("option", { value: EDIT_PINS }, "여러 분류 지정…"),
+    h("option", { value: EDIT_PINS }, t("pin.editMany")),
   );
   const locked = m.hidden_files > 0;
 
@@ -643,7 +647,7 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
     h(
       "div",
       { class: "card-body" },
-      h("button", { class: "card-title", title: "상세 보기", onclick: () => void openDetails(m) }, m.display_name),
+      h("button", { class: "card-title", title: t("card.details"), onclick: () => void openDetails(m) }, m.display_name),
       h("div", { class: "card-meta muted" }, meta || m.file_name),
       h(
         "div",
@@ -651,12 +655,22 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
         ...m.categories.map((c) =>
           h("span", { class: "badge cat" + (pins.length ? " pinned" : "") }, catLabel(c)),
         ),
-        h("span", { class: "badge src" }, m.source === "workshop" ? "창작마당" : "로컬"),
-        locked ? h("span", { class: "badge keep", title: lockedTitle(m) }, "목록 숨김") : null,
-        m.compat === "incompatible"
-          ? h("span", { class: "badge err", title: compatTitle(m.compatible_versions) }, "버전 불일치")
+        h("span", { class: "badge src" }, m.source === "workshop" ? t("badge.workshop") : t("badge.local")),
+        locked ? h("span", { class: "badge keep", title: lockedTitle(m) }, t("badge.locked")) : null,
+        m.suggested_category
+          ? h(
+              "span",
+              {
+                class: "badge suggest",
+                title: t("suggest.title", { cat: catLabel(m.suggested_category), why: evidenceText(m) }),
+              },
+              t("badge.suggest", { cat: catLabel(m.suggested_category) }),
+            )
           : null,
-        m.error ? h("span", { class: "badge err", title: m.error }, "읽기 실패") : null,
+        m.compat === "incompatible"
+          ? h("span", { class: "badge err", title: compatTitle(m.compatible_versions) }, t("badge.incompatible"))
+          : null,
+        m.error ? h("span", { class: "badge err", title: m.error }, t("badge.unreadable")) : null,
       ),
     ),
     h(
@@ -669,8 +683,8 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
           "button",
           {
             class: "star" + (m.favorite ? " on" : ""),
-            title: m.favorite ? "즐겨찾기 해제" : "즐겨찾기",
-            "aria-label": m.favorite ? "즐겨찾기 해제" : "즐겨찾기",
+            title: m.favorite ? t("fav.remove") : t("fav.add"),
+            "aria-label": m.favorite ? t("fav.remove") : t("fav.add"),
             "aria-pressed": String(m.favorite),
             onclick: () => void toggleFavorite(m),
           },
@@ -684,7 +698,7 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
           class: "btn small" + (isActive ? "" : " primary"),
           onclick: () => void (isActive ? removeActive(m.id) : addActive(m)),
         },
-        isActive ? "비활성화" : "활성화",
+        isActive ? t("card.deactivate") : t("card.activate"),
       ),
     ),
   );
@@ -703,11 +717,11 @@ function renderOrder() {
   const overridden = Object.keys(state.conflicts.overrides).length;
   const incompatible = state.active.filter((a) => a.compat === "incompatible").length;
   $("order-summary").textContent =
-    `활성 ${state.active.length}개` +
-    (misplaced ? ` · 그룹에 맞지 않는 모드 ${misplaced}개` : "") +
-    (heldCount ? ` · 순서 유지 ${heldCount}개` : "") +
-    (overridden ? ` · 덮어써지는 모드 ${overridden}개` : "") +
-    (incompatible ? ` · 버전 불일치 ${incompatible}개` : "");
+    t("order.active", { n: state.active.length }) +
+    (misplaced ? t("order.misplaced", { n: misplaced }) : "") +
+    (heldCount ? t("order.held", { n: heldCount }) : "") +
+    (overridden ? t("order.overridden", { n: overridden }) : "") +
+    (incompatible ? t("order.incompatible", { n: incompatible }) : "");
   $("show-conflicts").hidden =
     overridden === 0 && Object.keys(state.conflicts.frequent).length === 0;
   $<HTMLButtonElement>("auto-sort").disabled = state.plan.sorted;
@@ -765,7 +779,7 @@ function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLEle
     h("span", { class: "grip", "aria-hidden": "true" }, "⋮⋮"),
     h("span", { class: "row-name" }, item.display_name || item.name),
     row.misplaced ? placementBadge(row, item) : null,
-    item.installed ? null : h("span", { class: "badge err" }, "미설치"),
+    item.installed ? null : h("span", { class: "badge err" }, t("badge.notInstalled")),
     item.compat === "incompatible"
       ? h(
           "span",
@@ -773,13 +787,13 @@ function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLEle
             class: "badge err",
             title: compatTitle(state.mods.find((m) => m.id === item.name)?.compatible_versions ?? []),
           },
-          "버전 불일치",
+          t("badge.incompatible"),
         )
       : null,
     conflictGlyph(item),
     h(
       "button",
-      { class: "icon-btn", title: "비활성화", "aria-label": "비활성화", onclick: () => void removeActive(item.name) },
+      { class: "icon-btn", title: t("card.deactivate"), "aria-label": t("card.deactivate"), onclick: () => void removeActive(item.name) },
       "✕",
     ),
   );
@@ -820,19 +834,18 @@ async function moveActive(from: number, insertAt: number) {
 function placementBadge(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLElement {
   const group = groupLabel(row.expected_group_id);
   if (!state.plan.held.includes(item.name)) {
-    return h("span", { class: "badge warn", title: `분류상 '${group}' 그룹에 속합니다.` }, `→ ${group}`);
+    return h("span", { class: "badge warn", title: t("placement.belongs", { group }) }, `→ ${group}`);
   }
   const partners = (state.plan.partners[item.name] ?? []).map(displayNameOf);
-  const shown = partners.slice(0, 6).join(", ") + (partners.length > 6 ? ` 외 ${partners.length - 6}개` : "");
+  const shown = partners.slice(0, 6).join(", ") + (partners.length > 6 ? t("placement.andMore", { n: partners.length - 6 }) : "");
   return h(
     "span",
     {
       class: "badge keep",
       title:
-        `분류상 '${group}' 그룹이지만 이 위치가 맞습니다.\n` +
-        `같은 파일을 가진 모드와의 위아래 순서를 지켜야 해서 옮기지 않습니다: ${shown}`,
+        t("placement.heldTitle", { group, mods: shown }),
     },
-    "순서 유지",
+    t("badge.held"),
   );
 }
 
@@ -844,25 +857,25 @@ async function autoSort() {
   state.active = order.map((i) => state.active[i]);
   await relayout();
   setStatus(
-    "모드를 그룹별로 정렬했습니다. 같은 파일을 가진 모드끼리는 위아래 순서를 그대로 두어 우선순위가 바뀌지 않습니다." +
-      (held.length ? ` 그 때문에 ${held.length}개는 그룹 밖에 그대로 있습니다.` : "") +
-      " 저장해야 게임에 반영됩니다.",
+    t("sort.done") +
+      (held.length ? t("sort.held", { n: held.length }) : "") +
+      t("sort.saveNote"),
   );
 }
 
 async function revert() {
   state.active = JSON.parse(state.saved) as ActiveItem[];
   await relayout();
-  setStatus("변경 사항을 되돌렸습니다.");
+  setStatus(t("status.reverted"));
 }
 
 async function save() {
   if (!state.profilePath || !isDirty()) return;
   const game = state.game.toUpperCase();
   const ok = await confirmModal(
-    "로드 순서 저장",
-    `프로필의 활성 모드 목록을 덮어씁니다. 저장 전에 프로필 폴더 전체를 자동으로 백업합니다. ${game}가 실행 중이면 먼저 종료하세요. 게임이 종료할 때 프로필을 다시 써서 변경 사항이 사라질 수 있습니다.`,
-    "저장",
+    t("save.title"),
+    t("save.body", { game }),
+    t("common.save"),
   );
   if (!ok) return;
   try {
@@ -877,11 +890,11 @@ async function save() {
     renderProfileSelect();
     renderOrder();
     setStatus(
-      `저장했습니다. 백업: ${result.backup}` + (result.pruned ? ` (오래된 백업 ${result.pruned}개 정리)` : ""),
+      t("save.done", { backup: result.backup }) + (result.pruned ? t("save.pruned", { n: result.pruned }) : ""),
       "ok",
     );
   } catch (e) {
-    setStatus(`저장 실패: ${errorText(e)}`, "error");
+    setStatus(t("save.failed", { error: errorText(e) }), "error");
   }
 }
 
@@ -893,19 +906,43 @@ async function openCategoryDialog(m: Mod) {
   // start from the pins, or from what the automatic result says
   const chosen = new Set(m.category_pins.length ? m.category_pins : m.auto_categories);
   let main = (m.category_pins.length ? m.category_pins : m.auto_categories)[0] ?? "";
+  // A main category the user picked stays; otherwise it follows the
+  // selection. A pin that is being edited was picked by the user.
+  let mainPicked = m.category_pins.length > 0;
+  let selectionChanged = false;
+  /** Of several categories, the one whose load-order group sits highest.
+   *  A mod that covers several things is mostly there to override them,
+   *  and only wins all of its files from the highest of its groups. Where
+   *  it is the other way round (a truck that brings its own sounds), the
+   *  user marks the main category by hand. */
+  const highest = (cats: Iterable<string>) => {
+    const { groups, category_groups } = state.constants;
+    const rank = (c: string) => {
+      const group = groups.indexOf(category_groups[c] ?? "");
+      return group < 0 ? groups.length : group;
+    };
+    const byRank = (a: string, b: string) => rank(a) - rank(b) || categories.indexOf(a) - categories.indexOf(b);
+    return [...cats].sort(byRank)[0] ?? "";
+  };
   const error = h("div", { class: "form-error", role: "alert" });
   const summary = h("div", { class: "form-note" });
   const grid = h("div", { class: "cat-grid" });
 
   const draw = () => {
-    if (!chosen.has(main)) main = categories.find((c) => chosen.has(c)) ?? "";
+    if (!mainPicked || !chosen.has(main)) {
+      // nothing picked by hand (or the pick was unticked): follow the
+      // selection - except right after opening, where the main category
+      // shown is the one in effect
+      if (!chosen.has(main) || selectionChanged) main = highest(chosen);
+      mainPicked = false;
+    }
     grid.replaceChildren(
       ...categories.map((c) => {
         const check = h("input", { type: "checkbox", checked: chosen.has(c), "data-cat": c });
         check.addEventListener("change", () => {
           if (check.checked) chosen.add(c);
           else chosen.delete(c);
-          if (chosen.size === 1 && check.checked) main = c;
+          selectionChanged = true;
           draw();
           grid.querySelector<HTMLInputElement>(`input[type="checkbox"][data-cat="${c}"]`)?.focus();
         });
@@ -915,10 +952,11 @@ async function openCategoryDialog(m: Mod) {
           checked: main === c,
           disabled: !chosen.has(c),
           "data-main": c,
-          "aria-label": `${catLabel(c)}을(를) 대표 분류로`,
+          "aria-label": t("pin.mainAria", { cat: catLabel(c) }),
         });
         radio.addEventListener("change", () => {
           main = c;
+          mainPicked = true;
           draw();
           grid.querySelector<HTMLInputElement>(`input[type="radio"][data-main="${c}"]`)?.focus();
         });
@@ -926,25 +964,51 @@ async function openCategoryDialog(m: Mod) {
           "div",
           { class: "cat-row" + (chosen.has(c) ? " on" : "") + (main === c ? " main" : "") },
           h("label", { class: "form-check" }, check, h("span", {}, catLabel(c))),
-          h("label", { class: "cat-main" + (chosen.has(c) ? "" : " off") }, radio, h("span", {}, "대표")),
+          h("label", { class: "cat-main" + (chosen.has(c) ? "" : " off") }, radio, h("span", {}, t("pin.main"))),
         );
       }),
     );
     summary.textContent = main
-      ? `대표 분류: ${catLabel(main)} → 로드 순서 그룹 '${groupLabel(state.constants.category_groups[main] ?? "")}'`
-      : "분류를 하나 이상 고르세요.";
+      ? t("pin.mainSummary", { cat: catLabel(main), group: groupLabel(state.constants.category_groups[main] ?? "") })
+      : t("pin.chooseOne");
     error.textContent = "";
   };
   draw();
 
   const facts = [
-    `자동 분류: ${m.auto_categories.map(catLabel).join(", ")}`,
-    `모드가 선언한 분류: ${m.manifest_categories.join(", ") || "없음"}`,
+    t("pin.autoResult", { list: m.auto_categories.map(catLabel).join(", ") }) +
+      (m.judged_from_content ? t("pin.fromContent") : ""),
+    t("pin.declared", { list: m.manifest_categories.join(", ") || t("common.none") }),
   ];
+  if (m.evidence.length) facts.push(t("pin.evidence", { list: evidenceText(m) }));
+  // what the files point to without being sure: one click selects it
+  const suggested = m.suggested_category;
+  const suggestion = suggested
+    ? h(
+        "div",
+        { class: "form-note suggest" },
+        h("span", {}, t("pin.suggestion", { cat: catLabel(suggested) })),
+        h(
+          "button",
+          {
+            class: "btn small",
+            type: "button",
+            onclick: () => {
+              chosen.clear();
+              chosen.add(suggested);
+              main = suggested;
+              mainPicked = false;
+              selectionChanged = true;
+              draw();
+            },
+          },
+          t("pin.useSuggestion"),
+        ),
+      )
+    : null;
   if (m.hidden_files > 0) {
     facts.push(
-      `파일 목록을 숨긴 아카이브입니다 (숨은 파일 ${m.hidden_files.toLocaleString("ko-KR")}개 중 ` +
-        `${m.hidden_named.toLocaleString("ko-KR")}개 이름 확인). 내용으로 분류를 판별하기 어렵습니다.`,
+      t("pin.lockedNote", { hidden: num(m.hidden_files), named: num(m.hidden_named) }),
     );
   }
   const body = h(
@@ -953,9 +1017,10 @@ async function openCategoryDialog(m: Mod) {
     h(
       "div",
       {},
-      "이 모드가 다루는 분류를 모두 고르세요. '대표'로 고른 분류가 로드 순서의 그룹을 정하고, 나머지는 분류 필터와 배지에 쓰입니다.",
+      t("pin.intro"),
     ),
     h("div", { class: "form-note" }, facts.join("\n")),
+    suggestion,
     grid,
     summary,
     error,
@@ -963,18 +1028,18 @@ async function openCategoryDialog(m: Mod) {
 
   type Action = "cancel" | "auto" | "apply";
   const action = await openDialog<Action>({
-    title: `분류 지정 — ${m.display_name}`,
+    title: t("pin.dialogTitle", { name: m.display_name }),
     body,
     wide: true,
     dismiss: "cancel",
     buttons: [
-      { label: "취소", value: "cancel" },
-      { label: "자동 분류로", value: "auto" },
-      { label: "적용", value: "apply", kind: "primary" },
+      { label: t("common.cancel"), value: "cancel" },
+      { label: t("pin.toAuto"), value: "auto" },
+      { label: t("common.apply"), value: "apply", kind: "primary" },
     ],
     beforeClose: (value) => {
       if (value === "apply" && chosen.size === 0) {
-        error.textContent = "분류를 하나 이상 고르거나 '자동 분류로'를 누르세요.";
+        error.textContent = t("pin.needOne");
         return false;
       }
     },
@@ -999,9 +1064,9 @@ async function setOverride(m: Mod, tokens: string[]) {
     await relayout();
     setStatus(
       tokens.length
-        ? `'${m.display_name}'의 분류를 ${tokens.map(catLabel).join(" + ")}(으)로 고정했습니다.` +
-            (tokens.length > 1 ? ` 로드 순서는 ${catLabel(tokens[0])} 기준입니다.` : "")
-        : `'${m.display_name}'의 분류를 자동으로 되돌렸습니다.`,
+        ? t("pin.done", { name: m.display_name, list: tokens.map(catLabel).join(" + ") }) +
+            (tokens.length > 1 ? t("pin.doneOrder", { cat: catLabel(tokens[0]) }) : "")
+        : t("pin.cleared", { name: m.display_name }),
       "ok",
     );
   } catch (e) {
@@ -1154,23 +1219,31 @@ const EXTRACTABLE = new Set(["zip", "hashfs_v1", "hashfs_v2"]);
 async function openDetails(m: Mod) {
   const icon = icons.get(`${state.game}/${m.id}`);
   const rows: [string, string][] = [
-    ["제작자", m.author || "-"],
-    ["버전", m.version || "-"],
-    ["분류", m.categories.map(catLabel).join(", ") + (m.category_pins.length ? " (수동 고정)" : "")],
-    ["모드가 선언한 분류", m.manifest_categories.join(", ") || "-"],
-    ["출처", m.source === "workshop" ? "Steam 창작마당" : "로컬 모드 폴더"],
-    ["형식", m.format],
-    ["호환 버전", m.compatible_versions.join(", ") || "선언 없음"],
-    ["설치일", m.installed_at ? new Date(m.installed_at * 1000).toLocaleString("ko-KR") : "-"],
-    ["파일", m.path],
+    [t("detail.author"), m.author || "-"],
+    [t("detail.version"), m.version || "-"],
+    [
+      t("detail.category"),
+      m.categories.map(catLabel).join(", ") +
+        (m.category_pins.length ? t("detail.pinned") : m.judged_from_content ? t("detail.fromContent") : ""),
+    ],
+    [t("detail.declared"), m.manifest_categories.join(", ") || "-"],
+    ...(m.suggested_category
+      ? [[t("detail.suggestion"), catLabel(m.suggested_category)] as [string, string]]
+      : []),
+    ...(m.evidence.length ? [[t("detail.evidence"), evidenceText(m)] as [string, string]] : []),
+    [t("detail.source"), m.source === "workshop" ? t("detail.sourceWorkshop") : t("detail.sourceLocal")],
+    [t("detail.format"), m.format],
+    [t("detail.compat"), m.compatible_versions.join(", ") || t("detail.compatNone")],
+    [t("detail.installed"), m.installed_at ? new Date(m.installed_at * 1000).toLocaleString(locale()) : "-"],
+    [t("detail.file"), m.path],
   ];
   if (m.hidden_files > 0) {
     rows.push([
-      "파일 목록",
-      `숨김 — 숨은 파일 ${m.hidden_files.toLocaleString("ko-KR")}개 중 ${m.hidden_named.toLocaleString("ko-KR")}개 이름 확인`,
+      t("detail.listing"),
+      t("detail.listingHidden", { hidden: num(m.hidden_files), named: num(m.hidden_named) }),
     ]);
   }
-  if (m.error) rows.push(["읽기 오류", m.error]);
+  if (m.error) rows.push([t("detail.readError"), m.error]);
   const error = h("div", { class: "form-error", role: "alert" });
   const body = h(
     "div",
@@ -1181,12 +1254,12 @@ async function openDetails(m: Mod) {
     error,
   );
   const buttons: { label: string; value: DetailAction; kind?: "primary" | "danger" }[] = [
-    { label: "닫기", value: "close" },
-    { label: "파일 위치 열기", value: "reveal" },
+    { label: t("common.close"), value: "close" },
+    { label: t("detail.reveal"), value: "reveal" },
   ];
-  if (EXTRACTABLE.has(m.format) && !m.error) buttons.push({ label: "추출…", value: "extract" });
-  if (m.source === "workshop") buttons.push({ label: "창작마당 페이지", value: "workshop" });
-  else buttons.push({ label: "휴지통으로 삭제", value: "delete", kind: "danger" });
+  if (EXTRACTABLE.has(m.format) && !m.error) buttons.push({ label: t("detail.extract"), value: "extract" });
+  if (m.source === "workshop") buttons.push({ label: t("detail.workshopPage"), value: "workshop" });
+  else buttons.push({ label: t("detail.trash"), value: "delete", kind: "danger" });
 
   const action = await openDialog<DetailAction>({
     title: m.display_name,
@@ -1214,7 +1287,7 @@ async function extractMod(m: Mod) {
     const parent = await pickOpen({
       directory: true,
       multiple: false,
-      title: `'${m.display_name}'을(를) 추출할 위치`,
+      title: t("extract.pickTitle", { name: m.display_name }),
     });
     if (typeof parent === "string") await extractModTo(m.id, parent);
   } catch (e) {
@@ -1224,15 +1297,15 @@ async function extractMod(m: Mod) {
 
 async function extractModTo(id: string, parent: string) {
   const m = state.mods.find((x) => x.id === id);
-  if (!m) throw new Error("스캔 목록에 없는 모드입니다.");
+  if (!m) throw new Error(t("err.not_scanned"));
   const game = state.game;
 
   const bar = h("progress", { class: "extract-bar", max: "1", value: "0" });
-  const count = h("div", { class: "form-note" }, "아카이브를 여는 중…");
+  const count = h("div", { class: "form-note" }, t("extract.opening"));
   const body = h(
     "div",
     { class: "form" },
-    h("div", {}, `'${m.display_name}'의 파일을 푸는 중입니다. 모드 파일은 읽기만 합니다.`),
+    h("div", {}, t("extract.working", { name: m.display_name })),
     bar,
     count,
   );
@@ -1240,7 +1313,7 @@ async function extractModTo(id: string, parent: string) {
   onProgress.onmessage = ({ done, total }) => {
     bar.max = Math.max(total, 1);
     bar.value = done;
-    count.textContent = `${done.toLocaleString("ko-KR")} / ${total.toLocaleString("ko-KR")}개`;
+    count.textContent = t("extract.progress", { done: num(done), total: num(total) });
   };
 
   // closing the progress dialog in any way (button, Escape, backdrop) is
@@ -1248,14 +1321,14 @@ async function extractModTo(id: string, parent: string) {
   let running = true;
   let dialogOpen = true;
   void openDialog<void>({
-    title: "아카이브 추출",
+    title: t("extract.title"),
     body,
     dismiss: undefined,
-    buttons: [{ label: "취소", value: undefined }],
+    buttons: [{ label: t("common.cancel"), value: undefined }],
   }).then(() => {
     dialogOpen = false;
     if (running) {
-      setStatus("추출을 멈추는 중…");
+      setStatus(t("extract.stopping"));
       invoke("cancel_extract").catch(() => {});
     }
   });
@@ -1272,45 +1345,45 @@ async function extractModTo(id: string, parent: string) {
   } catch (e) {
     running = false;
     if (dialogOpen) dismissDialog();
-    setStatus(`추출 실패: ${errorText(e)}`, "error");
+    setStatus(t("extract.failed", { error: errorText(e) }), "error");
     return;
   }
   running = false;
   if (dialogOpen) dismissDialog();
 
-  const n = (v: number) => v.toLocaleString("ko-KR");
+  const n = num;
   const lines: string[] = [];
-  if (r.cancelled) lines.push(`추출을 취소했습니다. 그때까지 푼 파일 ${n(r.extracted)}개는 폴더에 남아 있습니다.`);
-  else if (r.total === 0) lines.push("추출할 수 있는 파일이 없습니다.");
-  else lines.push(`파일 ${n(r.total)}개 중 ${n(r.extracted)}개를 풀었습니다.`);
-  if (r.dest) lines.push(`위치: ${r.dest}`);
+  if (r.cancelled) lines.push(t("extract.cancelledKept", { n: n(r.extracted) }));
+  else if (r.total === 0) lines.push(t("extract.nothing"));
+  else lines.push(t("extract.summary", { total: n(r.total), extracted: n(r.extracted) }));
+  if (r.dest) lines.push(t("extract.location", { path: r.dest }));
   if (r.recovered + r.unnamed > 0) {
     lines.push(
       "",
-      "이 아카이브는 파일 목록이 숨겨져 있습니다(잠긴 아카이브).",
-      `  이름을 되찾은 파일: ${n(r.recovered)}개 (원래 경로에 풀었습니다)`,
-      `  이름을 찾지 못한 파일: ${n(r.unnamed)}개` +
-        (r.unnamed ? " ('_unnamed' 폴더에 해시 이름으로 풀었습니다. 확장자는 내용으로 추정했습니다)" : ""),
+      t("extract.locked"),
+      t("extract.recovered", { n: n(r.recovered) }),
+      t("extract.unnamed", { n: n(r.unnamed) }) +
+        (r.unnamed ? t("extract.unnamedNote") : ""),
     );
   }
   if (r.failed > 0) {
-    lines.push("", `풀지 못한 파일 ${n(r.failed)}개:`);
+    lines.push("", t("extract.failedList", { n: n(r.failed) }));
     lines.push(...r.failures.slice(0, 20).map((f) => `  ${f.entry}  (${f.error})`));
-    if (r.failed > 20) lines.push(`  … 외 ${n(r.failed - 20)}개`);
+    if (r.failed > 20) lines.push(t("common.more", { n: n(r.failed - 20) }));
   }
   const ok = !r.cancelled && r.failed === 0 && r.extracted > 0;
   setStatus(
     r.cancelled
-      ? "추출을 취소했습니다."
-      : `'${m.display_name}': 파일 ${n(r.extracted)}개를 추출했습니다.` + (r.failed ? ` 실패 ${n(r.failed)}개.` : ""),
+      ? t("extract.cancelled")
+      : t("extract.status", { name: m.display_name, n: n(r.extracted) }) + (r.failed ? t("extract.statusFailed", { n: n(r.failed) }) : ""),
     ok ? "ok" : r.cancelled ? "info" : "error",
   );
 
   const error = h("div", { class: "form-error", role: "alert" });
-  const buttons: { label: string; value: "close" | "open"; kind?: "primary" }[] = [{ label: "닫기", value: "close" }];
-  if (r.dest) buttons.push({ label: "폴더 열기", value: "open", kind: "primary" });
+  const buttons: { label: string; value: "close" | "open"; kind?: "primary" }[] = [{ label: t("common.close"), value: "close" }];
+  if (r.dest) buttons.push({ label: t("extract.openFolder"), value: "open", kind: "primary" });
   await openDialog<"close" | "open">({
-    title: r.cancelled ? "추출 취소됨" : "추출 완료",
+    title: r.cancelled ? t("extract.cancelledTitle") : t("extract.doneTitle"),
     body: h("div", { class: "form" }, h("div", { class: "report" }, lines.join("\n")), error),
     wide: true,
     dismiss: "close",
@@ -1337,24 +1410,24 @@ async function deleteMod(m: Mod) {
     return;
   }
   const ok = await confirmModal(
-    "모드 삭제",
-    `'${m.display_name}' 파일을 휴지통으로 옮깁니다. 휴지통에서 복원할 수 있습니다.` +
+    t("delete.title"),
+    t("delete.body", { name: m.display_name }) +
       (users.length
-        ? `\n\n이 모드는 다음 프로필의 로드 순서에 들어 있습니다: ${users.join(", ")}\n삭제해도 로드 순서에서는 빠지지 않고 '미설치'로 표시됩니다.`
+        ? t("delete.inUse", { profiles: users.join(", ") })
         : ""),
-    "휴지통으로 이동",
+    t("delete.ok"),
     true,
   );
   if (!ok) return;
   try {
     const r = await invoke<DeleteResult>("delete_mods", { game, ids: [m.id] });
     if (r.deleted.length === 0) {
-      setStatus(`삭제하지 못했습니다: ${r.failed[0]?.error ?? "알 수 없는 오류"}`, "error");
+      setStatus(t("delete.failed", { error: r.failed[0] ? backendText(r.failed[0].error) : t("common.unknownError") }), "error");
       return;
     }
     state.mods = state.mods.filter((x) => !r.deleted.includes(x.id));
     await resolveLists();
-    setStatus(`'${m.display_name}'을(를) 휴지통으로 옮겼습니다.`, "ok");
+    setStatus(t("delete.done", { name: m.display_name }), "ok");
   } catch (e) {
     setStatus(errorText(e), "error");
   }
@@ -1364,7 +1437,7 @@ async function openBackups() {
   const game = state.game;
   const profilePath = state.profilePath;
   if (!profilePath) {
-    setStatus("선택된 프로필이 없습니다.", "error");
+    setStatus(t("backup.noProfile"), "error");
     return;
   }
   const profileName = state.profiles.find((p) => p.path === profilePath)?.profile_name ?? "";
@@ -1378,12 +1451,12 @@ async function openBackups() {
     list.replaceChildren(
       ...(backups.length
         ? backups.map((b) => {
-            const del = h("button", { class: "btn small" }, "삭제");
+            const del = h("button", { class: "btn small" }, t("common.delete"));
             // deleting a backup cannot be undone: ask for a second click
             del.addEventListener("click", async () => {
               if (del.dataset.armed !== "1") {
                 del.dataset.armed = "1";
-                del.textContent = "정말 삭제";
+                del.textContent = t("backup.reallyDelete");
                 del.classList.add("danger");
                 return;
               }
@@ -1408,19 +1481,19 @@ async function openBackups() {
                     dismissDialog();
                   },
                 },
-                "복원",
+                t("common.restore"),
               ),
               del,
             );
           })
-        : [h("div", { class: "empty" }, "아직 백업이 없습니다. 로드 순서를 저장하면 자동으로 만들어집니다.")]),
+        : [h("div", { class: "empty" }, t("backup.empty"))]),
     );
     const total = backups.reduce((sum, b) => sum + b.size_bytes, 0);
     const keep = state.settings?.settings.backup_keep ?? 0;
     footer.textContent =
-      `백업 ${backups.length}개 · 합계 ${fmtSize(total)} · ` +
-      (keep ? `프로필당 최근 ${keep}개만 보관` : "개수 제한 없이 보관") +
-      (state.settings ? `\n위치: ${state.settings.backup_root}` : "");
+      t("backup.total", { n: backups.length, size: fmtSize(total) }) +
+      (keep ? t("backup.keepN", { n: keep }) : t("backup.keepAll")) +
+      (state.settings ? t("backup.location", { path: state.settings.backup_root }) : "");
   };
 
   try {
@@ -1430,22 +1503,22 @@ async function openBackups() {
     return;
   }
   await openDialog<void>({
-    title: `프로필 백업 — ${profileName}`,
+    title: t("backup.title", { name: profileName }),
     body: h("div", { class: "form" }, list, footer, error),
     wide: true,
     dismiss: undefined,
-    buttons: [{ label: "닫기", value: undefined, kind: "primary" }],
+    buttons: [{ label: t("common.close"), value: undefined, kind: "primary" }],
   });
   const chosen = restore as BackupDto | null;
   if (!chosen) return;
 
   const ok = await confirmModal(
-    "백업 복원",
-    `${fmtStamp(chosen.timestamp)} 백업으로 프로필 '${profileName}'을(를) 되돌립니다.\n\n` +
-      "복원 전에 현재 상태를 먼저 백업하므로 다시 되돌릴 수 있습니다. 세이브 파일도 그 시점으로 돌아갑니다." +
-      (isDirty() ? "\n저장하지 않은 로드 순서 변경은 사라집니다." : "") +
-      `\n\n${game.toUpperCase()}가 실행 중이면 먼저 종료하세요.`,
-    "복원",
+    t("restore.title"),
+    t("restore.body", { when: fmtStamp(chosen.timestamp), name: profileName }) +
+      t("restore.note") +
+      (isDirty() ? t("restore.dirty") : "") +
+      t("restore.closeGame", { game: game.toUpperCase() }),
+    t("common.restore"),
     true,
   );
   if (!ok) return;
@@ -1454,9 +1527,9 @@ async function openBackups() {
     state.profiles = await invoke<Profile[]>("list_profiles", { game });
     renderProfileSelect();
     await loadProfile();
-    setStatus(`복원했습니다. 복원 직전 상태의 백업: ${safety}`, "ok");
+    setStatus(t("restore.done", { path: safety }), "ok");
   } catch (e) {
-    setStatus(`복원 실패: ${errorText(e)}`, "error");
+    setStatus(t("restore.failed", { error: errorText(e) }), "error");
   }
 }
 
@@ -1472,6 +1545,13 @@ async function openSettings() {
   const s = view.settings;
 
   const lookup = h("input", { type: "checkbox", id: "set-lookup", checked: s.workshop_lookup });
+  // each language under its own name, so it can be found in any language
+  const language = h(
+    "select",
+    { id: "set-language" },
+    h("option", { value: "", selected: !s.language }, t("settings.languageSystem")),
+    ...LANGS.map((l) => h("option", { value: l.id, selected: s.language === l.id }, l.name)),
+  );
   const keep = h("input", {
     type: "number",
     id: "set-keep",
@@ -1485,7 +1565,7 @@ async function openSettings() {
       id,
       value: value ?? "",
       spellcheck: "false",
-      placeholder: detected ? `자동 감지: ${detected}` : "자동 감지 실패 — 경로를 직접 입력하세요",
+      placeholder: detected ? t("settings.detected", { path: detected }) : t("settings.detectFailed"),
     });
   const inputs = {
     ets2: {
@@ -1510,50 +1590,52 @@ async function openSettings() {
     );
   const pathFields = (title: string, group: { documents: HTMLElement; workshop: HTMLElement }) => [
     h("h3", {}, title),
-    field("문서 폴더", group.documents, "mod, profiles 폴더가 들어 있는 곳입니다. 비워 두면 자동 감지합니다."),
-    field("창작마당 폴더", group.workshop, "steamapps/workshop/content/<앱 ID> 폴더입니다. 비워 두면 자동 감지합니다."),
+    field(t("settings.docsDir"), group.documents, t("settings.docsNote")),
+    field(t("settings.wsDir"), group.workshop, t("settings.wsNote")),
   ];
   const body = h(
     "div",
     { class: "form" },
+    field(t("settings.language"), language),
     h(
       "label",
       { class: "form-check" },
       lookup,
-      h("span", {}, "창작마당 모드의 이름과 미리보기를 Steam에서 가져오기"),
+      h("span", {}, t("settings.lookup")),
     ),
-    h("div", { class: "form-note" }, "스캔 후 캐시에 없는 창작마당 ID만 Steam 공개 API로 보냅니다."),
-    field("프로필당 백업 보관 개수", keep, `0이면 모두 보관합니다. 백업 위치: ${view.backup_root}`),
-    ...pathFields("ETS2 경로", inputs.ets2),
-    ...pathFields("ATS 경로", inputs.ats),
-    h("h3", {}, "로드 순서 맨 위에 두는 모드"),
+    h("div", { class: "form-note" }, t("settings.lookupNote")),
+    field(t("settings.keep"), keep, t("settings.keepNote", { path: view.backup_root })),
+    ...pathFields(t("settings.ets2Paths"), inputs.ets2),
+    ...pathFields(t("settings.atsPaths"), inputs.ats),
+    h("h3", {}, t("settings.mapBase")),
     field(
-      "이름 조각 (한 줄에 하나)",
+      t("settings.mapBaseNames"),
       names,
-      "모드 이름에 이 글자가 들어 있으면 '맵 기반 · 배경 · 로딩 화면' 그룹으로 분류합니다.",
+      t("settings.mapBaseNote", { group: groupLabel("map_base") }),
     ),
     error,
   );
 
   const text = (el: HTMLInputElement) => el.value.trim() || null;
   const saved = await openDialog<boolean>({
-    title: "설정",
+    title: t("top.settings"),
     body,
     wide: true,
     dismiss: false,
     buttons: [
-      { label: "취소", value: false },
-      { label: "저장", value: true, kind: "primary" },
+      { label: t("common.cancel"), value: false },
+      { label: t("common.save"), value: true, kind: "primary" },
     ],
     beforeClose: async (value) => {
       if (!value) return;
       const count = Number(keep.value);
       if (!Number.isInteger(count) || count < 0 || count > 1000) {
-        error.textContent = "백업 보관 개수는 0에서 1000 사이의 정수여야 합니다.";
+        error.textContent = t("settings.keepInvalid");
         return false;
       }
       const next: Settings = {
         ...s,
+        language: language.value || null,
         workshop_lookup: lookup.checked,
         backup_keep: count,
         map_base_names: names.value.split("\n"),
@@ -1579,15 +1661,16 @@ async function openSettings() {
     setStatus(errorText(e), "error");
     return;
   }
+  applyLanguage();
   if (isDirty()) {
     renderGameSwitch();
-    setStatus("설정을 저장했습니다. 저장하지 않은 로드 순서가 있어 다시 스캔하지 않았습니다. '다시 스캔'을 누르면 반영됩니다.", "ok");
+    setStatus(t("settings.savedDirty"), "ok");
     return;
   }
   const target = state.installs.find((i) => i.game === state.game) ?? state.installs[0];
   if (!target) {
     renderGameSwitch();
-    setStatus("설정을 저장했습니다. ETS2 / ATS 데이터 폴더를 찾지 못했습니다.", "error");
+    setStatus(t("settings.savedNoInstall"), "error");
     return;
   }
   icons.clear();
@@ -1640,9 +1723,9 @@ async function exportShareTo(path: string) {
       items: activeEntries(),
       path,
     });
-    setStatus(`로드 순서 ${count}개를 내보냈습니다: ${path}`, "ok");
+    setStatus(t("share.exported", { n: count, path }), "ok");
   } catch (e) {
-    setStatus(`내보내기 실패: ${errorText(e)}`, "error");
+    setStatus(t("share.exportFailed", { error: errorText(e) }), "error");
   }
 }
 
@@ -1653,7 +1736,7 @@ async function importShareFrom(path: string) {
   try {
     preview = await invoke<SharePreview>("preview_share", { game: state.game, path });
   } catch (e) {
-    setStatus(`가져오기 실패: ${errorText(e)}`, "error");
+    setStatus(t("share.importFailed", { error: errorText(e) }), "error");
     return;
   }
   const missing = preview.entries.filter((e) => e.status !== "found");
@@ -1664,33 +1747,37 @@ async function importShareFrom(path: string) {
       { class: "share-row" + (e.status === "found" ? "" : " missing") },
       h("span", { class: "row-name" }, e.display_name || e.name),
       e.outdated
-        ? h("span", { class: "badge warn", title: `설치된 버전 ${e.local_version} · 공유 목록 ${e.share_version}` }, "구버전")
+        ? h("span", { class: "badge warn", title: t("share.versions", { local: e.local_version ?? "", share: e.share_version }) }, t("badge.outdated"))
         : null,
-      e.status === "missing_local" ? h("span", { class: "badge err" }, "미설치 · 로컬") : null,
+      e.status === "missing_local" ? h("span", { class: "badge err" }, t("share.missingLocal")) : null,
       e.status === "missing_workshop"
         ? h(
             "button",
             {
               class: "btn small",
-              title: "Steam 창작마당 페이지 열기",
+              title: t("share.openWorkshop"),
               onclick: () => {
                 const id = e.workshop_url?.split("id=")[1] ?? "";
                 invoke("open_workshop_item", { workshopId: id }).catch((err) => setStatus(errorText(err), "error"));
               },
             },
-            "미설치 · 창작마당 열기",
+            t("share.missingWorkshop"),
           )
         : null,
     ),
   );
   const source =
     preview.kind === "profile"
-      ? `프로필 파일${preview.profile_name ? ` '${preview.profile_name}'` : ""}`
-      : `공유 파일${preview.profile_name ? ` (프로필 '${preview.profile_name}')` : ""}`;
+      ? preview.profile_name
+        ? t("share.fromProfileNamed", { name: preview.profile_name })
+        : t("share.fromProfile")
+      : preview.profile_name
+        ? t("share.fromFileNamed", { name: preview.profile_name })
+        : t("share.fromFile");
   const summary =
-    `${source}: 모드 ${preview.entries.length}개 · 설치됨 ${preview.entries.length - missing.length}개` +
-    (missing.length ? ` · 미설치 ${missing.length}개` : "") +
-    (outdated.length ? ` · 구버전 ${outdated.length}개` : "");
+    t("share.summary", { source, n: preview.entries.length, installed: preview.entries.length - missing.length }) +
+    (missing.length ? t("share.summaryMissing", { n: missing.length }) : "") +
+    (outdated.length ? t("share.summaryOutdated", { n: outdated.length }) : "");
   const body = h(
     "div",
     { class: "form" },
@@ -1698,19 +1785,19 @@ async function importShareFrom(path: string) {
     h(
       "div",
       { class: "form-note" },
-      "가져오면 지금 편집 중인 로드 순서가 이 목록으로 바뀝니다. 프로필 파일은 '저장'을 눌러야 바뀝니다.",
+      t("share.importNote"),
     ),
     h("div", { class: "share-list" }, ...rows),
   );
   type Choice = "cancel" | "installed" | "all";
-  const buttons: { label: string; value: Choice; kind?: "primary" }[] = [{ label: "취소", value: "cancel" }];
+  const buttons: { label: string; value: Choice; kind?: "primary" }[] = [{ label: t("common.cancel"), value: "cancel" }];
   if (missing.length) {
-    buttons.push({ label: "설치된 모드만 가져오기", value: "installed", kind: "primary" });
-    buttons.push({ label: "미설치 포함 전부", value: "all" });
+    buttons.push({ label: t("share.importInstalled"), value: "installed", kind: "primary" });
+    buttons.push({ label: t("share.importEverything"), value: "all" });
   } else {
-    buttons.push({ label: "가져오기", value: "all", kind: "primary" });
+    buttons.push({ label: t("share.import"), value: "all", kind: "primary" });
   }
-  const choice = await openDialog<Choice>({ title: "로드 순서 가져오기", body, wide: true, dismiss: "cancel", buttons });
+  const choice = await openDialog<Choice>({ title: t("share.importTitle"), body, wide: true, dismiss: "cancel", buttons });
   if (choice === "cancel") return;
 
   const picked = preview.entries.filter((e) => choice === "all" || e.status === "found");
@@ -1720,18 +1807,18 @@ async function importShareFrom(path: string) {
       items: picked.map(({ name, display_name }) => ({ name, display_name })),
     });
     await relayout();
-    setStatus(`모드 ${picked.length}개를 가져왔습니다. '저장'을 눌러야 게임에 반영됩니다.`, "ok");
+    setStatus(t("share.imported", { n: picked.length }), "ok");
   } catch (e) {
-    setStatus(`가져오기 실패: ${errorText(e)}`, "error");
+    setStatus(t("share.importFailed", { error: errorText(e) }), "error");
   }
 }
 
 async function exportMapComboTo(path: string) {
   try {
     const count = await invoke<number>("export_map_combo", { game: state.game, items: activeEntries(), path });
-    setStatus(`맵 ${count}개의 순서를 내보냈습니다: ${path}`, "ok");
+    setStatus(t("combo.exported", { n: count, path }), "ok");
   } catch (e) {
-    setStatus(`내보내기 실패: ${errorText(e)}`, "error");
+    setStatus(t("share.exportFailed", { error: errorText(e) }), "error");
   }
 }
 
@@ -1740,13 +1827,13 @@ async function importMapComboFrom(path: string) {
   try {
     preview = await invoke<MapComboPreview>("preview_map_combo", { game: state.game, items: activeEntries(), path });
   } catch (e) {
-    setStatus(`가져오기 실패: ${errorText(e)}`, "error");
+    setStatus(t("share.importFailed", { error: errorText(e) }), "error");
     return;
   }
   if (preview.missing.length) {
     await infoModal(
-      "맵 콤보를 적용할 수 없습니다",
-      "이 콤보에 있는 다음 맵이 현재 로드 순서의 맵 그룹에 없습니다. 먼저 설치하고 활성화한 뒤 다시 가져오세요.\n\n" +
+      t("combo.cannotTitle"),
+      t("combo.cannotBody") +
         preview.missing.map((n) => `- ${n}`).join("\n"),
     );
     return;
@@ -1754,12 +1841,12 @@ async function importMapComboFrom(path: string) {
   const byName = new Map(state.active.map((a) => [a.name, a]));
   state.active = preview.order.flatMap((n) => byName.get(n) ?? []);
   await relayout();
-  setStatus(`맵 ${preview.count}개를 콤보 순서로 정렬했습니다. '저장'을 눌러야 게임에 반영됩니다.`, "ok");
+  setStatus(t("combo.applied", { n: preview.count }), "ok");
   if (preview.outdated.length) {
     await infoModal(
-      "콤보보다 오래된 맵",
-      "순서는 적용했습니다. 다음 맵은 콤보를 만든 사람보다 낮은 버전이 설치돼 있습니다.\n\n" +
-        preview.outdated.map((o) => `- ${o.name}: 설치됨 ${o.local}, 콤보 ${o.combo}`).join("\n"),
+      t("combo.outdatedTitle"),
+      t("combo.outdatedBody") +
+        preview.outdated.map((o) => t("combo.outdatedLine", { name: o.name, local: o.local, combo: o.combo })).join("\n"),
     );
   }
 }
@@ -1770,24 +1857,24 @@ async function openShareMenu() {
   const body = h(
     "div",
     { class: "form" },
-    h("div", {}, "로드 순서를 파일로 주고받습니다. 공유 파일에는 모드 이름과 버전만 들어 있고, 모드 파일 자체는 들어 있지 않습니다."),
+    h("div", {}, t("share.intro")),
     h(
       "div",
       { class: "form-note" },
-      "전체 가져오기는 공유 파일(.modshare.json)과 다른 사람의 profile.sii를 모두 읽습니다. 맵 콤보는 맵 그룹의 순서만 다룹니다.",
+      t("share.note"),
     ),
   );
   const action = await openDialog<ShareAction>({
-    title: "공유",
+    title: t("order.share"),
     body,
     wide: true,
     dismiss: "close",
     buttons: [
-      { label: "닫기", value: "close" },
-      { label: "전체 내보내기", value: "export", kind: "primary" },
-      { label: "전체 가져오기", value: "import" },
-      { label: "맵 콤보 내보내기", value: "combo-export" },
-      { label: "맵 콤보 가져오기", value: "combo-import" },
+      { label: t("common.close"), value: "close" },
+      { label: t("share.exportAll"), value: "export", kind: "primary" },
+      { label: t("share.importAll"), value: "import" },
+      { label: t("combo.export"), value: "combo-export" },
+      { label: t("combo.import"), value: "combo-import" },
     ],
   });
   try {
@@ -1797,7 +1884,7 @@ async function openShareMenu() {
     } else if (action === "import") {
       const path = await pickOpen({
         multiple: false,
-        filters: [{ name: "공유 파일 또는 프로필", extensions: ["json", "sii"] }],
+        filters: [{ name: t("share.fileFilter"), extensions: ["json", "sii"] }],
       });
       if (typeof path === "string") await importShareFrom(path);
     } else if (action === "combo-export") {
@@ -1892,12 +1979,31 @@ function bindControls() {
     await loadGame(state.game);
   });
   $("auto-sort").addEventListener("click", () => void autoSort());
-  $("show-conflicts").addEventListener("click", () => void infoModal("def 파일 충돌", conflictReport()));
+  $("show-conflicts").addEventListener("click", () => void infoModal(t("conflict.title"), conflictReport()));
   $("revert").addEventListener("click", () => void revert());
   $("save").addEventListener("click", () => void save());
 }
 
+/** Switch the interface to the stored language (or the system's) and
+ *  redraw everything that carries text. */
+function applyLanguage() {
+  setLang(resolveLang(state.settings?.settings.language));
+  applyStatic();
+  const select = $<HTMLSelectElement>("filter-category");
+  const chosen = select.value;
+  select.replaceChildren(
+    h("option", { value: "" }, t("lib.allCategories")),
+    ...state.constants.categories.map((c) => h("option", { value: c }, catLabel(c))),
+  );
+  select.value = chosen;
+  renderGameSwitch();
+  renderProfileSelect();
+  renderAll();
+}
+
 async function boot() {
+  // the system's language until the settings say otherwise
+  applyStatic();
   bindControls();
   setupReordering();
   try {
@@ -1910,15 +2016,12 @@ async function boot() {
     setStatus(errorText(e), "error");
     return;
   }
-  $("filter-category").replaceChildren(
-    h("option", { value: "" }, "모든 분류"),
-    ...state.constants.categories.map((c) => h("option", { value: c }, catLabel(c))),
-  );
+  applyLanguage();
   restoreView(state.settings.settings.view);
   if (state.installs.length === 0) {
     renderGameSwitch();
     renderAll();
-    setStatus("ETS2 / ATS 데이터 폴더를 찾지 못했습니다. 설정에서 경로를 직접 지정할 수 있습니다.", "error");
+    setStatus(t("status.noInstall"), "error");
     return;
   }
   // start where the user left off, else ETS2, else whatever exists
