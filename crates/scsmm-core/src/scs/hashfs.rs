@@ -312,6 +312,15 @@ impl ModSource for HashFsReader {
         self.iter_files()
     }
 
+    fn read_hashed(&mut self, hash: u64, max_bytes: usize) -> Option<Vec<u8>> {
+        let entry = self
+            .entries
+            .get(&hash)
+            .copied()
+            .filter(|e| !e.is_directory && !e.is_image && e.size as usize <= max_bytes)?;
+        self.content(entry).ok()
+    }
+
     fn path_hashes(&mut self) -> Option<Vec<u64>> {
         // a salted archive hashes "<salt><path>": comparable with nothing
         // outside itself

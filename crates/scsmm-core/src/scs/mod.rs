@@ -39,6 +39,16 @@ pub trait ModSource {
         None
     }
 
+    /// Content of the file stored under one of the [`path_hashes`], when
+    /// it is at most `max_bytes` long. `None` for sources without such
+    /// hashes, for larger files and for packed textures - the caller only
+    /// wants a look at small definition files it cannot name.
+    ///
+    /// [`path_hashes`]: ModSource::path_hashes
+    fn read_hashed(&mut self, _hash: u64, _max_bytes: usize) -> Option<Vec<u8>> {
+        None
+    }
+
     fn read_text(&mut self, path: &str) -> Result<String> {
         Ok(String::from_utf8_lossy(&self.read_bytes(path)?).into_owned())
     }

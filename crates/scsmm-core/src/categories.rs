@@ -58,17 +58,22 @@ pub fn canonical_categories<S: AsRef<str>>(raw: &[S]) -> Vec<String> {
 }
 
 /// Trustworthy categories: manual pins > content category >
-/// map-by-content > manifest.
+/// map-by-content > judged categories > manifest.
 ///
 /// `pins` are the categories the user set by hand, the main one first. A
 /// mod that covers several things (a truck with its own sounds and
 /// interior) can be pinned to all of them: the first decides where it goes
 /// in the load order, the rest only say what else it is.
-pub fn effective_categories<S: AsRef<str>, P: AsRef<str>>(
+///
+/// `judged` are the categories the analysis of the mod's files arrived at
+/// where it overrules the manifest (see [`crate::classify`]); empty when it
+/// agrees or is not sure.
+pub fn effective_categories<S: AsRef<str>, P: AsRef<str>, J: AsRef<str>>(
     manifest_categories: &[S],
     is_map: bool,
     pins: &[P],
     content_category: Option<&str>,
+    judged: &[J],
 ) -> Vec<String> {
     let single = |t: &str| vec![if is_official(t) { t } else { OTHER }.to_string()];
     if !pins.is_empty() {
@@ -79,6 +84,9 @@ pub fn effective_categories<S: AsRef<str>, P: AsRef<str>>(
     }
     if is_map {
         return vec![MAP.to_string()];
+    }
+    if !judged.is_empty() {
+        return canonical_categories(judged);
     }
     canonical_categories(manifest_categories)
 }
@@ -134,14 +142,19 @@ mod tests {
     fn effective_priority() {
         let m = ["truck"];
         let none: [&str; 0] = [];
-        assert_eq!(effective_categories(&m, false, &none, None), ["truck"]);
-        assert_eq!(effective_categories(&m, true, &none, None), ["map"]);
-        assert_eq!(effective_categories(&m, true, &none, Some("physics")), ["physics"]);
-        assert_eq!(effective_categories(&m, true, &["sound"], Some("physics")), ["sound"]);
-        assert_eq!(effective_categories(&m, false, &["bogus"], None), ["other"]);
+        assert_eq!(effective_categories(&m, false, &none, None, &none), ["truck"]);
+        assert_eq!(effective_categories(&m, true, &none, None, &none), ["map"]);
+        assert_eq!(effective_categories(&m, true, &none, Some("physics"), &none), ["physics"]);
+        assert_eq!(effective_categories(&m, true, &["sound"], Some("physics"), &none), ["sound"]);
+        assert_eq!(effective_categories(&m, false, &["bogus"], None, &none), ["other"]);
+        // judged categories replace the manifest, but nothing above it
+        let judged = ["interior", "truck"];
+        assert_eq!(effective_categories(&m, false, &none, None, &judged), ["interior", "truck"]);
+        assert_eq!(effective_categories(&m, true, &none, None, &judged), ["map"]);
+        assert_eq!(effective_categories(&m, false, &["sound"], None, &judged), ["sound"]);
         // several pins: order kept (the first is the main one), no repeats
         assert_eq!(
-            effective_categories(&m, true, &["truck", "sound", "truck", "interior"], Some("physics")),
+            effective_categories(&m, true, &["truck", "sound", "truck", "interior"], Some("physics"), &none),
             ["truck", "sound", "interior"]
         );
     }

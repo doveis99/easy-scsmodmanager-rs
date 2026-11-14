@@ -5,12 +5,15 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use scsmm_core::classify::Confidence;
 use scsmm_core::game::{self, Game, GameInstall};
+use scsmm_core::gamepaths::GamePaths;
 use scsmm_core::identity::ActiveModMatcher;
 use scsmm_core::load_order::{self, Row, DEFAULT_MAP_BASE_NAMES};
 use scsmm_core::profile;
 use scsmm_core::scanner::{self, ScannedMod};
 use scsmm_core::steam;
+use scsmm_core::workshop_api::WorkshopCache;
 
 const USAGE: &str = "\
 scsmm - inspect ETS2/ATS mods and load order (read-only)
@@ -18,6 +21,11 @@ scsmm - inspect ETS2/ATS mods and load order (read-only)
 USAGE:
     scsmm installs                         detected game data folders
     scsmm scan     [--game ets2|ats]       every installed mod and its category
+    scsmm classify [--game ets2|ats] [--all]
+                                           what the content of each mod says it
+                                           is, and why; without --all only the
+                                           mods where that differs from the
+                                           manifest
     scsmm profiles [--game ets2|ats]       profiles and their active mod count
     scsmm order    [--game ets2|ats] [--profile <name>] [--sorted]
                                            load order of a profile, grouped;
@@ -30,6 +38,7 @@ struct Args {
     game: Game,
     profile: Option<String>,
     sorted: bool,
+    all: bool,
 }
 
 fn parse_args(rest: &[String]) -> Result<Args, String> {
@@ -37,6 +46,7 @@ fn parse_args(rest: &[String]) -> Result<Args, String> {
         game: Game::Ets2,
         profile: None,
         sorted: false,
+        all: false,
     };
     let mut it = rest.iter();
     while let Some(a) = it.next() {
@@ -47,6 +57,7 @@ fn parse_args(rest: &[String]) -> Result<Args, String> {
             }
             "--profile" => args.profile = Some(it.next().ok_or("--profile needs a value")?.clone()),
             "--sorted" => args.sorted = true,
+            "--all" => args.all = true,
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
@@ -60,11 +71,24 @@ fn install_for(game: Game, libs: &[std::path::PathBuf]) -> Result<GameInstall, S
         .ok_or_else(|| format!("no {} install detected", game.short_name()))
 }
 
+/// Where the app keeps what it can fetch or build again - the same
+/// folder the GUI uses, so both share the game's path index.
+fn cache_dir() -> std::path::PathBuf {
+    match std::env::var_os("LOCALAPPDATA") {
+        Some(local) if cfg!(windows) => std::path::PathBuf::from(local).join("easy-scsmodmanager-rs"),
+        _ => profile::system_data_dir().join("cache"),
+    }
+}
+
 fn scan(install: &GameInstall, libs: &[std::path::PathBuf]) -> Vec<ScannedMod> {
     let version = game::read_game_version(&install.documents_dir);
     let install_dir = game::find_game_install_dir(install.game, libs);
     let owned = game::owned_dlc_tokens(install_dir.as_deref());
-    scanner::scan_game_install(install, version.as_deref(), owned.as_ref(), None)
+    // the game's own paths tell a replaced file from a new one; built on
+    // the first run (a second or two), then read from the cache
+    let cache = cache_dir().join("gamepaths").join(format!("{}.bin", install.game.short_name().to_lowercase()));
+    let mut game_paths = install_dir.as_deref().and_then(|dir| GamePaths::load_or_build(dir, &cache).ok());
+    scanner::scan_game_install(install, version.as_deref(), owned.as_ref(), game_paths.as_mut())
 }
 
 fn cmd_installs() -> Result<(), String> {
@@ -120,6 +144,70 @@ fn cmd_scan(args: &Args) -> Result<(), String> {
     for (cat, n) in by_category {
         println!("  {cat:<14} {n}");
     }
+    Ok(())
+}
+
+fn cmd_classify(args: &Args) -> Result<(), String> {
+    let libs = steam::discover_steam_libraries();
+    let install = install_for(args.game, &libs)?;
+    let started = Instant::now();
+    let mods = scan(&install, &libs);
+    let elapsed = started.elapsed();
+    // workshop mods rarely name themselves in the manifest
+    let titles = WorkshopCache::open(&cache_dir().join("workshop"));
+
+    let (mut applied, mut suggested) = (0, 0);
+    for m in &mods {
+        let verdict = m.verdict();
+        let suggestion = m.suggested_category(&[]);
+        let auto = m.effective_categories(&[]);
+        let overruled = verdict.as_ref().is_some_and(|v| v.applied && auto.first().map(String::as_str) == Some(v.category));
+        applied += usize::from(overruled);
+        suggested += usize::from(suggestion.is_some());
+        if !args.all && !overruled && suggestion.is_none() {
+            continue;
+        }
+        let title = m
+            .workshop_id()
+            .and_then(|id| titles.title(&id).map(str::to_string))
+            .unwrap_or_else(|| m.display_name());
+        let manifest = m.manifest.as_ref().map(|x| x.categories.join(",")).unwrap_or_default();
+        println!("{title}");
+        print!("    manifest: {:<22} auto: {}", if manifest.is_empty() { "-" } else { &manifest }, auto.join(","));
+        match &verdict {
+            Some(v) => {
+                let sure = if v.confidence == Confidence::High { "high" } else { "medium" };
+                let what = if overruled {
+                    "from content".to_string()
+                } else if suggestion.is_some() {
+                    format!("suggests {}", v.category)
+                } else {
+                    // a map descriptor or the physics file decided instead
+                    format!("content says {}", v.category)
+                };
+                println!("    <- {what} ({sure}, {:.0}% of definitions)", v.share * 100.0);
+            }
+            None => println!(),
+        }
+        let e = &m.evidence;
+        let signals: Vec<String> = e
+            .signals
+            .iter()
+            .take(6)
+            .map(|s| format!("{}{} x{}", if s.from_content { "unit " } else { "" }, s.key, s.count))
+            .collect();
+        if !signals.is_empty() {
+            println!("    {}", signals.join(" | "));
+        }
+        if e.hidden > 0 {
+            println!("    locked: {} unnamed files, {} of {} looked into could be read", e.hidden, e.hidden_read, e.hidden_tried);
+        }
+    }
+    println!(
+        "\n{} mods in {:.2?}: {applied} recategorised from content, {suggested} suggestions",
+        mods.len(),
+        elapsed
+    );
     Ok(())
 }
 
@@ -256,6 +344,7 @@ fn main() -> ExitCode {
     let result = match cmd.as_str() {
         "installs" => cmd_installs(),
         "scan" => parse_args(rest).and_then(|a| cmd_scan(&a)),
+        "classify" => parse_args(rest).and_then(|a| cmd_classify(&a)),
         "profiles" => parse_args(rest).and_then(|a| cmd_profiles(&a)),
         "order" => parse_args(rest).and_then(|a| cmd_order(&a)),
         "extract" => cmd_extract(rest),

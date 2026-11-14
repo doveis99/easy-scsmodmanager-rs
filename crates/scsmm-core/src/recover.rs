@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::gamepaths::GamePaths;
 use crate::scs::hashfs::HashFsReader;
+use crate::sii::crypto::{decode_3nk, is_3nk};
 
 /// Contents larger than this are not searched for paths: definitions,
 /// materials and model descriptors are small, and reading every large
@@ -199,6 +200,8 @@ pub fn recover_names(
         let Ok(data) = reader.read_by_hash(*hash) else {
             continue;
         };
+        // a scrambled definition names its files just the same
+        let data = if is_3nk(&data) { decode_3nk(&data).unwrap_or(data) } else { data };
         let mut local: Vec<String> = Vec::new();
         for token in path_tokens(&data) {
             guesses.clear();
@@ -270,7 +273,7 @@ pub fn recover_names(
 pub fn sniff_extension(data: &[u8]) -> &'static str {
     let text_start = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data);
     let starts = |magic: &[u8]| data.starts_with(magic);
-    if text_start.starts_with(b"SiiNunit") || starts(b"BSII") || starts(b"ScsC") {
+    if text_start.starts_with(b"SiiNunit") || starts(b"BSII") || starts(b"ScsC") || is_3nk(data) {
         "sii"
     } else if starts(b"DDS ") {
         "dds"
@@ -418,6 +421,7 @@ mod tests {
     fn extensions_from_content() {
         assert_eq!(sniff_extension(b"SiiNunit\n{"), "sii");
         assert_eq!(sniff_extension(b"\xef\xbb\xbfSiiNunit"), "sii");
+        assert_eq!(sniff_extension(b"3nK\x01\x00\x10\x3b"), "sii");
         assert_eq!(sniff_extension(b"DDS \x7c"), "dds");
         assert_eq!(sniff_extension(b"material : \"eut2.dif\""), "mat");
         assert_eq!(sniff_extension(b"plain words\n"), "txt");

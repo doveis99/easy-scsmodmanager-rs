@@ -8,6 +8,7 @@
 //! GPL-3.0-or-later).
 
 pub mod categories;
+pub mod classify;
 pub mod compat;
 pub mod conflicts;
 pub mod extract;

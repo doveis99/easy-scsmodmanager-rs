@@ -8,7 +8,7 @@
 //! * `workshop/content/<appid>/<id>/<slot>`   - workshop archive or dir,
 //!   with `versions.sii` selecting the active slot
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::categories::{contains_map, content_category, effective_categories};
+use crate::classify::{self, Evidence, EvidenceBuilder, Label, Verdict};
 use crate::game::GameInstall;
 use crate::gamepaths::GamePaths;
 use crate::identity::{mod_name_for_path, workshop_id_for_path};
@@ -62,6 +63,10 @@ pub struct ScannedMod {
     pub installed_at: f64,
     #[serde(skip)]
     pub icon: Option<Vec<u8>>,
+    /// What the files say the mod is: every named file labelled by its
+    /// path, corrected by a sample of what the files contain.
+    #[serde(skip)]
+    pub evidence: Evidence,
 }
 
 impl ScannedMod {
@@ -86,20 +91,45 @@ impl ScannedMod {
         }
     }
 
+    fn manifest_categories(&self) -> &[String] {
+        self.manifest
+            .as_ref()
+            .map(|m| m.categories.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// What the content says the mod is, where that differs from the
+    /// manifest. Applied or only a suggestion - see [`Verdict::applied`].
+    pub fn verdict(&self) -> Option<Verdict> {
+        classify::judge(&self.evidence, self.manifest_categories())
+    }
+
     /// Categories: the user's pins (main one first), else what the
     /// content proves, else the manifest.
     pub fn effective_categories(&self, pins: &[String]) -> Vec<String> {
-        let manifest_cats = self
-            .manifest
-            .as_ref()
-            .map(|m| m.categories.as_slice())
+        let judged = self
+            .verdict()
+            .filter(|v| v.applied)
+            .map(|v| v.categories)
             .unwrap_or_default();
         effective_categories(
-            manifest_cats,
+            self.manifest_categories(),
             self.is_map,
             pins,
             content_category(&self.def_files),
+            &judged,
         )
+    }
+
+    /// A category the content points to without being sure enough to
+    /// overrule the manifest - for the user to accept or not. `None` once
+    /// the user pinned the mod, and where a map descriptor or the physics
+    /// file settles the category anyway.
+    pub fn suggested_category(&self, pins: &[String]) -> Option<&'static str> {
+        if !pins.is_empty() || self.is_map || content_category(&self.def_files).is_some() {
+            return None;
+        }
+        self.verdict().filter(|v| !v.applied).map(|v| v.category)
     }
 
     fn failed(path: &Path, format: ScsFormat, message: impl Into<String>) -> Self {
@@ -116,6 +146,7 @@ impl ScannedMod {
             hidden_named: 0,
             installed_at: 0.0,
             icon: None,
+            evidence: Evidence::default(),
         }
     }
 
@@ -165,10 +196,9 @@ fn scan_paths(
     owned_dlc: Option<&BTreeSet<String>>,
     game_paths: Option<&mut GamePaths>,
 ) -> Vec<ScannedMod> {
-    let mut mods: Vec<ScannedMod> = paths
-        .par_iter()
-        .map(|p| scan_one(p, owned_dlc))
-        .collect();
+    // read-only while the archives are scanned in parallel
+    let ctx = ScanContext { owned_dlc, game: game_paths.as_deref() };
+    let mut mods: Vec<ScannedMod> = paths.par_iter().map(|p| scan_with(p, ctx)).collect();
     name_hidden_files(&mut mods, game_paths);
     mods
 }
@@ -257,11 +287,23 @@ fn workshop_payloads(directory: &Path, game_version: Option<&str>) -> Vec<PathBu
         .collect()
 }
 
+/// What a scan knows besides the archive itself.
+#[derive(Clone, Copy)]
+struct ScanContext<'a> {
+    owned_dlc: Option<&'a BTreeSet<String>>,
+    /// The game's own file paths: tells a replaced file from a new one.
+    game: Option<&'a GamePaths>,
+}
+
 pub fn scan_one(path: &Path, owned_dlc: Option<&BTreeSet<String>>) -> ScannedMod {
+    scan_with(path, ScanContext { owned_dlc, game: None })
+}
+
+fn scan_with(path: &Path, ctx: ScanContext) -> ScannedMod {
     let mut result = if path.is_dir() {
-        scan_directory(path, owned_dlc)
+        scan_directory(path, ctx)
     } else if path.is_file() {
-        scan_archive(path, owned_dlc)
+        scan_archive(path, ctx)
     } else {
         ScannedMod::failed(path, ScsFormat::Unknown, "path does not exist")
     };
@@ -400,15 +442,69 @@ fn listing_facts(
     }
 }
 
+/// Files of one path label whose content is looked into.
+const SAMPLES_PER_LABEL: usize = 16;
+/// Unnamed files of a locked archive that are looked into.
+const HIDDEN_SAMPLES: usize = 160;
+/// Definitions are small; nothing larger is read for its content.
+const MAX_SAMPLE_BYTES: usize = 256 * 1024;
+
+/// About `count` of `items`, spread evenly over all of them.
+fn evenly<T>(items: &[T], count: usize) -> impl Iterator<Item = &T> {
+    let step = items.len().div_ceil(count.max(1)).max(1);
+    items.iter().step_by(step)
+}
+
+/// Label every file of a mod and look into a sample of its definitions.
+/// `files` is the listing as the source spells it, `hidden` the hashes of
+/// the files it does not name.
+fn gather_evidence(source: &mut dyn ModSource, files: &[String], hidden: &[u64], ctx: ScanContext) -> Evidence {
+    let mut builder = EvidenceBuilder::default();
+    // per label: the definition files a sample is drawn from
+    let mut candidates: HashMap<Label, Vec<&String>> = HashMap::new();
+    let mut seen = HashSet::new();
+    for file in files {
+        let path = strip_dlc_prefix(strip_base_prefix(file), ctx.owned_dlc);
+        // directory entries and the root-level files say nothing
+        if path.ends_with('/') || !path.contains('/') {
+            continue;
+        }
+        let path = path.to_ascii_lowercase();
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let replaces = ctx.game.map(|game| game.contains(city_hash64(path.as_bytes())));
+        let label = builder.add_path(&path, replaces);
+        if path.starts_with("def/") && (path.ends_with(".sii") || path.ends_with(".sui")) {
+            candidates.entry(label).or_default().push(file);
+        }
+    }
+    for (label, files) in candidates {
+        for file in evenly(&files, SAMPLES_PER_LABEL) {
+            match source.read_bytes(file) {
+                Ok(data) if data.len() <= MAX_SAMPLE_BYTES => builder.add_sample(label, &data),
+                _ => {}
+            }
+        }
+    }
+    builder.set_hidden(hidden.len());
+    for hash in evenly(hidden, HIDDEN_SAMPLES) {
+        builder.add_hidden_sample(source.read_hashed(*hash, MAX_SAMPLE_BYTES).as_deref());
+    }
+    builder.finish()
+}
+
 fn from_bundle(
     path: &Path,
     format: ScsFormat,
     bundle: ManifestBundle,
     source: &mut dyn ModSource,
-    owned_dlc: Option<&BTreeSet<String>>,
+    ctx: ScanContext,
 ) -> ScannedMod {
     let root_names = [bundle.manifest.icon.as_str(), bundle.manifest.description_file.as_str()];
-    let facts = listing_facts(&source.list_files(), source.path_hashes(), &root_names, owned_dlc);
+    let files = source.list_files();
+    let facts = listing_facts(&files, source.path_hashes(), &root_names, ctx.owned_dlc);
+    let evidence = gather_evidence(source, &files, &facts.hidden, ctx);
     ScannedMod {
         path: path.to_path_buf(),
         format,
@@ -422,6 +518,7 @@ fn from_bundle(
         hidden_named: 0,
         installed_at: 0.0,
         icon: bundle.icon,
+        evidence,
     }
 }
 
@@ -429,19 +526,19 @@ fn scan_source(
     path: &Path,
     format: ScsFormat,
     source: &mut dyn ModSource,
-    owned_dlc: Option<&BTreeSet<String>>,
+    ctx: ScanContext,
 ) -> std::result::Result<ScannedMod, Error> {
     let bundle = read_bundle(source)?;
-    Ok(from_bundle(path, format, bundle, source, owned_dlc))
+    Ok(from_bundle(path, format, bundle, source, ctx))
 }
 
-fn scan_directory(directory: &Path, owned_dlc: Option<&BTreeSet<String>>) -> ScannedMod {
+fn scan_directory(directory: &Path, ctx: ScanContext) -> ScannedMod {
     DirSource::open(directory)
-        .and_then(|mut s| scan_source(directory, ScsFormat::Directory, &mut s, owned_dlc))
+        .and_then(|mut s| scan_source(directory, ScsFormat::Directory, &mut s, ctx))
         .unwrap_or_else(|e| ScannedMod::failed(directory, ScsFormat::Directory, e.to_string()))
 }
 
-fn scan_archive(path: &Path, owned_dlc: Option<&BTreeSet<String>>) -> ScannedMod {
+fn scan_archive(path: &Path, ctx: ScanContext) -> ScannedMod {
     let mut format = match detect_format(path) {
         Ok(f) => f,
         Err(e) => return ScannedMod::failed(path, ScsFormat::Unknown, e.to_string()),
@@ -456,20 +553,20 @@ fn scan_archive(path: &Path, owned_dlc: Option<&BTreeSet<String>>) -> ScannedMod
     }
 
     match format {
-        ScsFormat::Zip => scan_zip(path, owned_dlc),
+        ScsFormat::Zip => scan_zip(path, ctx),
         ScsFormat::HashfsV1 | ScsFormat::HashfsV2 => HashFsReader::open(path)
-            .and_then(|mut r| scan_source(path, format, &mut r, owned_dlc))
+            .and_then(|mut r| scan_source(path, format, &mut r, ctx))
             .unwrap_or_else(|e| ScannedMod::failed(path, format, e.to_string())),
         ScsFormat::Aem => AemSource::open(path)
-            .and_then(|mut r| scan_source(path, format, &mut r, owned_dlc))
+            .and_then(|mut r| scan_source(path, format, &mut r, ctx))
             .unwrap_or_else(|e| ScannedMod::failed(path, format, e.to_string())),
         _ => ScannedMod::failed(path, format, "Unknown SCS container format"),
     }
 }
 
-fn scan_zip(path: &Path, owned_dlc: Option<&BTreeSet<String>>) -> ScannedMod {
+fn scan_zip(path: &Path, ctx: ScanContext) -> ScannedMod {
     let fmt = ScsFormat::Zip;
-    let first = ZipSource::open(path).and_then(|mut z| scan_source(path, fmt, &mut z, owned_dlc));
+    let first = ZipSource::open(path).and_then(|mut z| scan_source(path, fmt, &mut z, ctx));
     let prior_error = match first {
         Ok(found) => return found,
         Err(e) => e.to_string(),
@@ -477,7 +574,7 @@ fn scan_zip(path: &Path, owned_dlc: Option<&BTreeSet<String>>) -> ScannedMod {
 
     // second pass for zips the normal reader refused: a set encryption flag
     // and an odd method label over an ordinary raw-deflate payload
-    let second = RawZipSource::open(path).and_then(|mut r| scan_source(path, fmt, &mut r, owned_dlc));
+    let second = RawZipSource::open(path).and_then(|mut r| scan_source(path, fmt, &mut r, ctx));
     match second {
         Ok(found) => found,
         Err(e) => {
@@ -711,6 +808,69 @@ mod tests {
             assert_eq!((m.hidden.len(), m.hidden_named), (3, 1));
             assert!(!m.is_map, "a file below map/ is not a map descriptor");
         }
+    }
+
+    #[test]
+    fn the_files_of_a_mod_can_overrule_its_manifest() {
+        use crate::sii::crypto::testutil::scramble_3nk;
+        const BARE: &[u8] = b"SiiNunit {\n mod_package: .package {\n display_name: \"Bare\"\n }\n}";
+        let tmp = tempfile::tempdir().unwrap();
+        let mod_dir = tmp.path().join("mod");
+        fs::create_dir_all(&mod_dir).unwrap();
+
+        // dashboard layouts whose manifest (MANIFEST) says "truck"
+        make_zip(
+            &mod_dir.join("a_dash.scs"),
+            &[
+                ("manifest.sii", MANIFEST),
+                ("ui/dashboard/x.sii", b"."),
+                ("ui/dashboard/x_gps.sii", b"."),
+                ("ui/template/dashboard_text.x.sii", b"."),
+                ("material/ui/dashboard/x.dds", b"."),
+            ],
+        );
+        // a locked archive of scrambled paint jobs that declares nothing:
+        // no file name and no readable byte, yet the units give it away
+        let paint = scramble_3nk(b"SiiNunit\n{\naccessory_paint_job_data : red.x.paint_job\n{\n}\n}\n", 0x10);
+        fs::write(
+            mod_dir.join("b_locked_paint.scs"),
+            build_locked_v1(&[
+                ("manifest.sii", BARE),
+                ("def/vehicle/truck/x/paint_job/a.sii", paint.as_slice()),
+                ("def/vehicle/truck/x/paint_job/b.sii", paint.as_slice()),
+                ("def/vehicle/truck/x/paint_job/c.sii", paint.as_slice()),
+                ("vehicle/truck/x/paint/a.dds", b"DDS "),
+            ]),
+        )
+        .unwrap();
+        // one stray definition against the manifest: too little to act on
+        make_zip(&mod_dir.join("c_camera.scs"), &[("manifest.sii", MANIFEST), ("def/camera/units/x.sii", b".")]);
+        // a truck part declared as a truck: at home there, nothing to say
+        make_zip(
+            &mod_dir.join("d_part.scs"),
+            &[("manifest.sii", MANIFEST), ("def/vehicle/truck/x/accessory/mirror/a.sii", b".")],
+        );
+
+        let mods = scan_mod_directory(&mod_dir, None);
+        let (dash, locked, camera, part) = (&mods[0], &mods[1], &mods[2], &mods[3]);
+        let none: [String; 0] = [];
+
+        assert_eq!(dash.effective_categories(&none), ["interior"]);
+        assert_eq!(dash.suggested_category(&none), None);
+        // the user's pin still wins
+        assert_eq!(dash.effective_categories(&["truck".to_string()]), ["truck"]);
+
+        assert!(locked.error.is_none(), "{:?}", locked.error);
+        assert_eq!((locked.evidence.hidden, locked.evidence.hidden_tried, locked.evidence.hidden_read), (4, 4, 3));
+        assert_eq!(locked.effective_categories(&none), ["paint_job"]);
+        assert!(locked.evidence.signals.iter().any(|s| s.from_content && s.key == "accessory_paint_job_data"));
+
+        assert_eq!(camera.effective_categories(&none), ["truck"]);
+        assert_eq!(camera.suggested_category(&none), Some("other"));
+        assert_eq!(camera.suggested_category(&["truck".to_string()]), None);
+
+        assert_eq!(part.effective_categories(&none), ["truck"]);
+        assert_eq!((part.verdict(), part.suggested_category(&none)), (None, None));
     }
 
     #[test]

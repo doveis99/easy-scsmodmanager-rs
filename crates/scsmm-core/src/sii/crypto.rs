@@ -1,4 +1,5 @@
-//! Decrypts ScsC SII files (profile.sii etc).
+//! Decodes the two wrapped SII layouts: ScsC (profile.sii etc) and 3nK
+//! (definition files of mods whose author scrambled them).
 //!
 //! SCS stores the profile with AES-256-CBC plus zlib. The key is publicly
 //! known and ships in every game install.
@@ -14,6 +15,15 @@
 //! There is no encrypt counterpart on purpose: the game verifies the HMAC
 //! of an encrypted profile and that algorithm is not public, so the writer
 //! always emits plaintext (which the game reads without the check).
+//!
+//! 3nK is no encryption, only a byte-wise XOR with a running key:
+//!
+//! ```text
+//! 0x00  4   magic "3nK\x01"
+//! 0x04  1   unused
+//! 0x05  1   seed
+//! 0x06  N   payload; byte i is XORed with key(seed + i)
+//! ```
 
 use std::io::Read;
 
@@ -58,15 +68,58 @@ pub fn decrypt_scsc(data: &[u8]) -> Result<Vec<u8>> {
     Ok(plain)
 }
 
-/// Decode a profile.sii payload to text, decrypting when needed.
+pub const THREE_NK_MAGIC: &[u8; 4] = b"3nK\x01";
+const THREE_NK_HEADER: usize = 6;
+
+pub fn is_3nk(data: &[u8]) -> bool {
+    data.starts_with(THREE_NK_MAGIC)
+}
+
+/// Key byte of the 3nK scrambling for position `seed`.
+fn key_3nk(seed: u8) -> u8 {
+    (((seed << 2) ^ !seed) << 3) ^ seed
+}
+
+/// Undo the 3nK scrambling. The result is whatever was wrapped - plain
+/// text in practice.
+pub fn decode_3nk(data: &[u8]) -> Result<Vec<u8>> {
+    if !is_3nk(data) {
+        return Err(format_err("not a 3nK blob"));
+    }
+    if data.len() < THREE_NK_HEADER {
+        return Err(format_err("truncated 3nK header"));
+    }
+    let seed = data[5];
+    Ok(data[THREE_NK_HEADER..]
+        .iter()
+        .enumerate()
+        .map(|(i, b)| b ^ key_3nk(seed.wrapping_add(i as u8)))
+        .collect())
+}
+
+/// The bytes of a SII file with every known wrapper taken off: 3nK
+/// scrambling and ScsC encryption, in whatever order they were applied.
+/// Anything else comes back unchanged.
+pub fn unwrap_sii(data: &[u8]) -> Result<Vec<u8>> {
+    let mut plain = data.to_vec();
+    // a wrapper inside a wrapper is possible, an endless chain is not
+    for _ in 0..4 {
+        plain = if is_3nk(&plain) {
+            decode_3nk(&plain)?
+        } else if is_scsc(&plain) {
+            decrypt_scsc(&plain)?
+        } else {
+            break;
+        };
+    }
+    Ok(plain)
+}
+
+/// Decode a SII payload to text, unwrapping it when needed.
 /// `strict` refuses invalid UTF-8 instead of replacing it - the writer uses
 /// that so it never round-trips a lossy copy of the user's profile.
 pub fn sii_bytes_to_text(data: &[u8], strict: bool) -> Result<String> {
-    let plain = if is_scsc(data) {
-        decrypt_scsc(data)?
-    } else {
-        data.to_vec()
-    };
+    let plain = unwrap_sii(data)?;
     if strict {
         String::from_utf8(plain).map_err(|_| format_err("profile is not valid UTF-8"))
     } else {
@@ -75,7 +128,21 @@ pub fn sii_bytes_to_text(data: &[u8], strict: bool) -> Result<String> {
 }
 
 #[cfg(test)]
+pub(crate) mod testutil {
+    use super::{key_3nk, THREE_NK_MAGIC};
+
+    /// Wrap `plain` the way a 3nK-scrambled definition file is stored.
+    pub fn scramble_3nk(plain: &[u8], seed: u8) -> Vec<u8> {
+        let mut out = THREE_NK_MAGIC.to_vec();
+        out.extend_from_slice(&[0, seed]);
+        out.extend(plain.iter().enumerate().map(|(i, b)| b ^ key_3nk(seed.wrapping_add(i as u8))));
+        out
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::testutil::scramble_3nk;
     use super::*;
     use aes::cipher::BlockEncryptMut;
     use std::io::Write;
@@ -105,6 +172,33 @@ mod tests {
         assert!(is_scsc(&blob));
         assert_eq!(decrypt_scsc(&blob).unwrap(), plain);
         assert_eq!(sii_bytes_to_text(&blob, true).unwrap().as_bytes(), plain);
+    }
+
+    #[test]
+    fn decodes_3nk() {
+        // the first bytes of a real scrambled definition file
+        let real = [0x33, 0x6e, 0x4b, 0x01, 0x00, 0x10, 0x3b, 0x28, 0x53, 0x5d, 0xb9, 0x8b, 0xf7, 0xc3];
+        assert_eq!(decode_3nk(&real).unwrap(), b"SiiNunit");
+
+        // the key wraps around after 256 bytes
+        let plain: Vec<u8> = (0..700u32).map(|i| (i * 7) as u8).collect();
+        for seed in [0u8, 0x10, 0xff] {
+            let blob = scramble_3nk(&plain, seed);
+            assert!(is_3nk(&blob));
+            assert_eq!(decode_3nk(&blob).unwrap(), plain);
+        }
+        assert!(decode_3nk(b"SiiNunit").is_err());
+        assert!(decode_3nk(b"3nK\x01").is_err());
+    }
+
+    #[test]
+    fn unwraps_nested_and_leaves_plain_alone() {
+        let plain = b"SiiNunit\n{\n}\n";
+        assert_eq!(unwrap_sii(plain).unwrap(), plain);
+        let scrambled = scramble_3nk(plain, 0x42);
+        assert_eq!(sii_bytes_to_text(&scrambled, true).unwrap().as_bytes(), plain);
+        let both = scramble_3nk(&encrypt_for_test(plain), 3);
+        assert_eq!(unwrap_sii(&both).unwrap(), plain);
     }
 
     #[test]

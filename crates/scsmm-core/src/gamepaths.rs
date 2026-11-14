@@ -190,6 +190,14 @@ impl GamePaths {
     }
 
     /// The path (no leading slash) whose unsalted hash is `hash`.
+    /// True when the game has a file whose (unsalted) path hashes to
+    /// `hash`. Unlike [`name_of`] this reads nothing from disk.
+    ///
+    /// [`name_of`]: GamePaths::name_of
+    pub fn contains(&self, hash: u64) -> bool {
+        self.hashes.binary_search(&hash).is_ok()
+    }
+
     pub fn name_of(&mut self, hash: u64) -> Option<String> {
         let i = self.hashes.binary_search(&hash).ok()?;
         let (start, end) = (self.offsets[i] as u64, self.offsets[i + 1] as u64);

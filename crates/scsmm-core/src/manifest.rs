@@ -3,6 +3,7 @@
 use serde::Serialize;
 
 use crate::scs::ModSource;
+use crate::sii::crypto::sii_bytes_to_text;
 use crate::sii::{parse_sii, SiiUnit};
 use crate::{format_err, Error, Result};
 
@@ -63,7 +64,8 @@ pub fn read_bundle(source: &mut dyn ModSource) -> Result<ManifestBundle> {
     if !source.has(MANIFEST_ENTRY) {
         return Err(Error::NotFound(format!("missing {MANIFEST_ENTRY}")));
     }
-    let text = source.read_text(MANIFEST_ENTRY)?;
+    // some authors scramble even the manifest
+    let text = sii_bytes_to_text(&source.read_bytes(MANIFEST_ENTRY)?, false)?;
     let manifest = ModManifest::from_units(&parse_sii(&text)?)?;
     let icon = read_icon(source, &manifest);
     let description = read_description(source, &manifest);
