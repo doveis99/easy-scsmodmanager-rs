@@ -204,7 +204,10 @@ async function loadGame(game: GameId) {
   state.active = [];
   state.saved = "[]";
   state.profilePath = "";
+  // the old layout indexes into the list that was just cleared
+  state.layout = { rows: [], misplaced: 0 };
   renderGameSwitch();
+  renderProfileSelect();
   renderAll();
   setStatus("모드를 스캔하는 중…");
   const started = performance.now();
@@ -485,8 +488,12 @@ function renderOrder() {
     else counts.set(currentGroup, (counts.get(currentGroup) ?? 0) + 1);
   }
 
+  const tail = h("div", { class: "row tail", "aria-hidden": "true" });
+  tail.dataset.insertAt = String(state.active.length);
   rowsEl.replaceChildren(
-    ...rows.map((row, i) => {
+    ...rows.flatMap((row, i) => {
+      // a layout that is momentarily out of step with the list draws nothing
+      if (row.kind === "mod" && !state.active[row.index]) return [];
       const el =
         row.kind === "spacer"
           ? h(
@@ -497,8 +504,9 @@ function renderOrder() {
             )
           : orderRow(row, state.active[row.index]);
       el.dataset.insertAt = String(insertAt[i]);
-      return el;
+      return [el];
     }),
+    tail,
   );
 }
 
@@ -507,7 +515,7 @@ function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLEle
     "div",
     {
       class: "row mod" + (row.misplaced ? " misplaced" : "") + (item.installed ? "" : " missing"),
-      draggable: "true",
+      tabindex: "0",
       "data-index": String(row.index),
     },
     h("span", { class: "grip", "aria-hidden": "true" }, "⋮⋮"),
@@ -619,44 +627,103 @@ async function setOverride(m: Mod, token: string | null) {
   }
 }
 
-// ---------------------------------------------------------- drag & drop
+// ---------------------------------------------------------- reordering
 
-function setupDragAndDrop() {
+/** Pointer-driven reordering of the load-order rows.
+ *
+ *  Deliberately not HTML5 drag-and-drop: inside a desktop webview that is
+ *  at the mercy of the host's own drop handling, and it cannot scroll the
+ *  list while dragging. Plain pointer events behave the same everywhere. */
+function setupReordering() {
   const rowsEl = $("rows");
-  let dragIndex = -1;
+  const THRESHOLD = 5; // px of travel before a press becomes a drag
+  const EDGE = 36; // px from the list edge where auto-scroll kicks in
+  let drag: { from: number; x: number; y: number; active: boolean; pointerId: number } | null = null;
+  let target: HTMLElement | null = null;
+  let scrollTimer = 0;
+  let lastY = 0;
 
-  const rowOf = (ev: Event) => (ev.target as HTMLElement).closest<HTMLElement>(".row");
-  const clearMarks = () =>
-    rowsEl.querySelectorAll(".drop-before").forEach((el) => el.classList.remove("drop-before"));
+  const mark = (row: HTMLElement | null) => {
+    if (row === target) return;
+    target?.classList.remove("drop-before");
+    target = row;
+    target?.classList.add("drop-before");
+  };
 
-  rowsEl.addEventListener("dragstart", (ev) => {
-    const row = rowOf(ev);
-    if (!row || row.dataset.index === undefined) return;
-    dragIndex = Number(row.dataset.index);
-    row.classList.add("dragging");
-    ev.dataTransfer?.setData("text/plain", row.dataset.index);
-    if (ev.dataTransfer) ev.dataTransfer.effectAllowed = "move";
-  });
-  rowsEl.addEventListener("dragend", () => {
-    dragIndex = -1;
-    clearMarks();
+  const rowAt = (x: number, y: number): HTMLElement | null => {
+    const bounds = rowsEl.getBoundingClientRect();
+    if (y < bounds.top || y > bounds.bottom) return null;
+    // keep tracking when the pointer drifts sideways out of the list
+    const cx = Math.min(Math.max(x, bounds.left + 4), bounds.right - 4);
+    const hit = document.elementFromPoint(cx, y)?.closest<HTMLElement>(".row");
+    return hit && rowsEl.contains(hit) ? hit : null;
+  };
+
+  const autoScroll = () => {
+    const bounds = rowsEl.getBoundingClientRect();
+    if (lastY < bounds.top + EDGE) rowsEl.scrollTop -= 12;
+    else if (lastY > bounds.bottom - EDGE) rowsEl.scrollTop += 12;
+  };
+
+  const finish = () => {
+    window.clearInterval(scrollTimer);
+    scrollTimer = 0;
     rowsEl.querySelectorAll(".dragging").forEach((el) => el.classList.remove("dragging"));
+    rowsEl.classList.remove("reordering");
+    mark(null);
+    if (drag && rowsEl.hasPointerCapture(drag.pointerId)) rowsEl.releasePointerCapture(drag.pointerId);
+    drag = null;
+  };
+
+  rowsEl.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0 || (ev.target as HTMLElement).closest("button")) return;
+    const row = (ev.target as HTMLElement).closest<HTMLElement>(".row.mod");
+    if (!row || row.dataset.index === undefined) return;
+    drag = { from: Number(row.dataset.index), x: ev.clientX, y: ev.clientY, active: false, pointerId: ev.pointerId };
   });
-  rowsEl.addEventListener("dragover", (ev) => {
-    if (dragIndex < 0) return;
-    const row = rowOf(ev);
-    if (!row) return;
-    ev.preventDefault();
-    clearMarks();
-    row.classList.add("drop-before");
+
+  rowsEl.addEventListener("pointermove", (ev) => {
+    if (!drag || ev.pointerId !== drag.pointerId) return;
+    if (!drag.active) {
+      if (Math.hypot(ev.clientX - drag.x, ev.clientY - drag.y) < THRESHOLD) return;
+      drag.active = true;
+      rowsEl.setPointerCapture(ev.pointerId);
+      rowsEl.classList.add("reordering");
+      rowsEl.querySelector(`.row.mod[data-index="${drag.from}"]`)?.classList.add("dragging");
+      scrollTimer = window.setInterval(autoScroll, 30);
+    }
+    lastY = ev.clientY;
+    mark(rowAt(ev.clientX, ev.clientY));
   });
-  rowsEl.addEventListener("drop", (ev) => {
-    const row = rowOf(ev);
-    if (dragIndex < 0 || !row) return;
+
+  rowsEl.addEventListener("pointerup", (ev) => {
+    if (!drag || ev.pointerId !== drag.pointerId) return;
+    const { from, active } = drag;
+    const row = active ? rowAt(ev.clientX, ev.clientY) : null;
+    finish();
+    if (row?.dataset.insertAt !== undefined) void moveActive(from, Number(row.dataset.insertAt));
+  });
+
+  rowsEl.addEventListener("pointercancel", finish);
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && drag) finish();
+  });
+
+  // keyboard: Alt+Up / Alt+Down moves the focused row by one place
+  rowsEl.addEventListener("keydown", (ev) => {
+    if (!ev.altKey || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) return;
+    const row = (ev.target as HTMLElement).closest<HTMLElement>(".row.mod");
+    if (!row || row.dataset.index === undefined) return;
     ev.preventDefault();
-    const from = dragIndex;
-    dragIndex = -1;
-    void moveActive(from, Number(row.dataset.insertAt));
+    const from = Number(row.dataset.index);
+    const to = ev.key === "ArrowUp" ? from - 1 : from + 1;
+    if (to < 0 || to >= state.active.length) return;
+    const name = state.active[from].name;
+    // moving down by one means inserting after the next row
+    void moveActive(from, ev.key === "ArrowUp" ? to : to + 1).then(() => {
+      const moved = state.active.findIndex((a) => a.name === name);
+      rowsEl.querySelector<HTMLElement>(`.row.mod[data-index="${moved}"]`)?.focus();
+    });
   });
 }
 
@@ -703,7 +770,7 @@ function bindControls() {
 
 async function boot() {
   bindControls();
-  setupDragAndDrop();
+  setupReordering();
   try {
     [state.constants, state.installs] = await Promise.all([
       invoke<Constants>("constants"),
