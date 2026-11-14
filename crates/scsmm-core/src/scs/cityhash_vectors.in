@@ -1,0 +1,13 @@
+const VECTORS: &[(&str, u64)] = &[
+    ("", 0x9AE16A3B2F90404F),
+    ("a", 0x2420662CD003ACFA),
+    ("abc", 0x3A912F483A4ECE31),
+    ("manifest.sii", 0xB97FFF7CE7377C95),
+    ("def/vehicle/physics.sii", 0xD55D1DE2A3965CAE),
+    ("material/ui/accessory/some_icon_file.mat", 0x150303F2CC070EDE),
+    ("def/vehicle/truck/scania.s_2016/sound/interior/engine_idle_loop_", 0x1FECCEE4228B360A),
+    ("def/vehicle/truck/scania.s_2016/sound/interior/engine_idle_loop_l", 0x873E2AEF965282F6),
+    ("def/vehicle/truck/scania.s_2016/sound/interior/engine_idle_loop_long_variant_", 0x85E07568C4F8F846),
+    ("def/vehicle/truck/scania.s_2016/sound/interior/engine_idle_loop_long_variant_def/vehicle/truck/scania.s_2016/sound/interior/engine_idle_loop_long_variant_", 0x62E6894C5BE680C4),
+    ("def/vehicle/truck/scania.s_2016/sound/interior/engine_idle_loop_long_variant_def/vehicle/truck/scania.s_2016/sound/interior/engine_idle_loop_long_variant_def/vehicle/truck/scania.s_2016/sound/interior/engine_idle_loop_long_variant_x", 0x33C557B98C767282),
+];

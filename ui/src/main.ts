@@ -1,0 +1,730 @@
+import { invoke } from "@tauri-apps/api/core";
+
+// ---------------------------------------------------------------- types
+
+type GameId = "ets2" | "ats";
+
+interface InstallInfo {
+  game: GameId;
+  short_name: string;
+  documents_dir: string;
+  workshop_dir: string | null;
+  version: string | null;
+}
+
+interface Mod {
+  id: string;
+  path: string;
+  file_name: string;
+  source: "local" | "workshop";
+  workshop_url: string | null;
+  format: string;
+  display_name: string;
+  author: string;
+  version: string;
+  categories: string[];
+  manifest_categories: string[];
+  category_override: string | null;
+  group_token: string;
+  is_map: boolean;
+  error: string | null;
+  installed_at: number;
+  description: string | null;
+  compatible_versions: string[];
+  has_icon: boolean;
+}
+
+interface Profile {
+  path: string;
+  profile_name: string;
+  active_count: number;
+  error: string | null;
+}
+
+interface ActiveItem {
+  name: string;
+  display_name: string;
+  token: string;
+  installed: boolean;
+}
+
+type Row =
+  | { kind: "spacer"; group_id: string }
+  | { kind: "mod"; index: number; misplaced: boolean; expected_group_id: string };
+
+interface Layout {
+  rows: Row[];
+  misplaced: number;
+}
+
+interface Constants {
+  categories: string[];
+  groups: string[];
+}
+
+// --------------------------------------------------------------- labels
+
+const CATEGORY_LABEL: Record<string, string> = {
+  truck: "트럭",
+  trailer: "트레일러",
+  interior: "인테리어",
+  tuning_parts: "튜닝 파츠",
+  ai_traffic: "AI 교통",
+  sound: "사운드",
+  paint_job: "도색",
+  cargo_pack: "화물",
+  map: "맵",
+  ui: "UI",
+  weather_setup: "날씨",
+  physics: "물리",
+  graphics: "그래픽",
+  models: "모델",
+  movers: "무버",
+  walkers: "보행자",
+  prefabs: "프리팹",
+  other: "기타",
+};
+
+const GROUP_LABEL: Record<string, string> = {
+  map_base: "맵 기반 · 배경 · 로딩 화면",
+  graphics_weather: "그래픽 · 날씨",
+  sound: "사운드",
+  physics: "물리",
+  ui_other: "UI · 기타",
+  tuning_interior: "튜닝 · 인테리어",
+  ai_traffic: "AI 교통",
+  cargo: "화물",
+  paint_jobs: "도색",
+  trailers: "트레일러",
+  trucks: "트럭",
+  maps: "맵",
+};
+
+const catLabel = (token: string) => CATEGORY_LABEL[token] ?? token;
+const groupLabel = (id: string) => GROUP_LABEL[id] ?? id;
+
+// ---------------------------------------------------------------- state
+
+const state = {
+  constants: { categories: [], groups: [] } as Constants,
+  installs: [] as InstallInfo[],
+  game: "ets2" as GameId,
+  mods: [] as Mod[],
+  profiles: [] as Profile[],
+  profilePath: "",
+  active: [] as ActiveItem[],
+  /** JSON of the list as last loaded/saved - the dirty check. */
+  saved: "[]",
+  layout: { rows: [], misplaced: 0 } as Layout,
+  filter: { q: "", category: "", source: "", sort: "name" },
+  /** Bumped per load so a slow response for an old game/profile is dropped. */
+  epoch: 0,
+};
+
+const icons = new Map<string, string | null>();
+
+// ------------------------------------------------------------ dom utils
+
+function $<T extends HTMLElement>(id: string): T {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`missing element #${id}`);
+  return el as T;
+}
+
+type Child = Node | string | null | undefined | false;
+
+/** Build an element. Text always goes through textContent: mod names and
+ *  descriptions come from untrusted archives. */
+function h<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  props: Partial<Record<string, string | boolean | ((ev: Event) => void)>> = {},
+  ...children: Child[]
+): HTMLElementTagNameMap[K] {
+  const el = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (typeof value === "function") {
+      el.addEventListener(key.replace(/^on/, ""), value as EventListener);
+    } else if (typeof value === "boolean") {
+      if (value) el.setAttribute(key, "");
+    } else if (value !== undefined) {
+      el.setAttribute(key, value);
+    }
+  }
+  for (const child of children) {
+    if (child === null || child === undefined || child === false) continue;
+    el.append(child);
+  }
+  return el;
+}
+
+function setStatus(message: string, kind: "info" | "error" | "ok" = "info") {
+  const el = $("status");
+  el.textContent = message;
+  el.dataset.kind = kind;
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function confirmModal(title: string, body: string, okLabel: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const modal = $("modal");
+    $("modal-title").textContent = title;
+    $("modal-body").textContent = body;
+    const ok = $<HTMLButtonElement>("modal-ok");
+    const cancel = $<HTMLButtonElement>("modal-cancel");
+    ok.textContent = okLabel;
+    const close = (answer: boolean) => {
+      modal.hidden = true;
+      ok.onclick = cancel.onclick = null;
+      document.removeEventListener("keydown", onKey);
+      resolve(answer);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") close(false);
+    };
+    ok.onclick = () => close(true);
+    cancel.onclick = () => close(false);
+    document.addEventListener("keydown", onKey);
+    modal.hidden = false;
+    ok.focus();
+  });
+}
+
+// -------------------------------------------------------------- loading
+
+const isDirty = () => JSON.stringify(state.active) !== state.saved;
+
+async function loadGame(game: GameId) {
+  const epoch = ++state.epoch;
+  state.game = game;
+  state.mods = [];
+  state.profiles = [];
+  state.active = [];
+  state.saved = "[]";
+  state.profilePath = "";
+  renderGameSwitch();
+  renderAll();
+  setStatus("모드를 스캔하는 중…");
+  const started = performance.now();
+  try {
+    const [mods, profiles] = await Promise.all([
+      invoke<Mod[]>("scan_mods", { game }),
+      invoke<Profile[]>("list_profiles", { game }),
+    ]);
+    if (epoch !== state.epoch) return;
+    state.mods = mods;
+    state.profiles = profiles;
+    // default to the profile with the most active mods
+    const usable = profiles.filter((p) => !p.error);
+    const best = usable.reduce<Profile | null>(
+      (a, b) => (a && a.active_count >= b.active_count ? a : b),
+      null,
+    );
+    state.profilePath = best?.path ?? "";
+    renderProfileSelect();
+    await loadProfile();
+    const unreadable = mods.filter((m) => m.error).length;
+    const ms = Math.round(performance.now() - started);
+    setStatus(
+      `모드 ${mods.length}개를 ${ms}ms에 스캔했습니다.` +
+        (unreadable ? ` 읽지 못한 모드 ${unreadable}개.` : ""),
+      "ok",
+    );
+  } catch (e) {
+    if (epoch !== state.epoch) return;
+    renderAll();
+    setStatus(errorText(e), "error");
+  }
+}
+
+async function loadProfile() {
+  const epoch = state.epoch;
+  if (!state.profilePath) {
+    state.active = [];
+  } else {
+    const items = await invoke<ActiveItem[]>("read_load_order", {
+      game: state.game,
+      profilePath: state.profilePath,
+    });
+    if (epoch !== state.epoch) return;
+    state.active = items;
+  }
+  state.saved = JSON.stringify(state.active);
+  await relayout();
+}
+
+/** Recompute group headers for the current list and redraw everything. */
+async function relayout() {
+  const epoch = state.epoch;
+  const layout = await invoke<Layout>("layout_rows", {
+    tokens: state.active.map((a) => a.token),
+  });
+  if (epoch !== state.epoch) return;
+  state.layout = layout;
+  renderAll();
+}
+
+// ------------------------------------------------------------ rendering
+
+function renderAll() {
+  renderLibrary();
+  renderOrder();
+}
+
+function renderGameSwitch() {
+  const box = $("game-switch");
+  box.replaceChildren(
+    ...(["ets2", "ats"] as GameId[]).map((g) => {
+      const install = state.installs.find((i) => i.game === g);
+      return h(
+        "button",
+        {
+          class: "seg-btn" + (state.game === g ? " on" : ""),
+          role: "tab",
+          "aria-selected": String(state.game === g),
+          disabled: !install,
+          title: install ? install.documents_dir : "설치를 찾지 못했습니다",
+          onclick: () => void switchGame(g),
+        },
+        g.toUpperCase(),
+      );
+    }),
+  );
+  const current = state.installs.find((i) => i.game === state.game);
+  $("game-version").textContent = current?.version ? `게임 버전 ${current.version}` : "";
+}
+
+async function switchGame(game: GameId) {
+  if (game === state.game) return;
+  if (isDirty() && !(await confirmDiscard())) return;
+  await loadGame(game);
+}
+
+function confirmDiscard(): Promise<boolean> {
+  return confirmModal(
+    "저장하지 않은 변경 사항",
+    "로드 순서를 바꿨지만 아직 저장하지 않았습니다. 변경 사항을 버릴까요?",
+    "버리기",
+  );
+}
+
+function renderProfileSelect() {
+  const select = $<HTMLSelectElement>("profile-select");
+  select.replaceChildren(
+    ...state.profiles.map((p) =>
+      h(
+        "option",
+        { value: p.path, disabled: !!p.error, selected: p.path === state.profilePath },
+        p.error ? `${p.profile_name} (읽기 실패)` : `${p.profile_name} · 활성 ${p.active_count}개`,
+      ),
+    ),
+  );
+  if (state.profiles.length === 0) {
+    select.append(h("option", { value: "" }, "프로필 없음"));
+  }
+  select.disabled = state.profiles.length === 0;
+}
+
+function filteredMods(): Mod[] {
+  const { q, category, source, sort } = state.filter;
+  const needle = q.trim().toLowerCase();
+  const out = state.mods.filter((m) => {
+    if (category && !m.categories.includes(category)) return false;
+    if (source && m.source !== source) return false;
+    if (!needle) return true;
+    const hay = [m.display_name, m.author, m.file_name, ...m.categories.map(catLabel), ...m.categories]
+      .join("\n")
+      .toLowerCase();
+    return hay.includes(needle);
+  });
+  if (sort === "date") {
+    out.sort((a, b) => b.installed_at - a.installed_at);
+  } else {
+    out.sort((a, b) => a.display_name.localeCompare(b.display_name, "ko"));
+  }
+  return out;
+}
+
+const iconObserver = new IntersectionObserver(
+  (entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      iconObserver.unobserve(entry.target);
+      void loadIcon(entry.target as HTMLElement);
+    }
+  },
+  { rootMargin: "300px" },
+);
+
+async function loadIcon(holder: HTMLElement) {
+  const id = holder.dataset.modId;
+  const game = state.game;
+  if (!id) return;
+  const key = `${game}/${id}`;
+  if (!icons.has(key)) {
+    try {
+      icons.set(key, await invoke<string | null>("mod_icon", { game, id }));
+    } catch {
+      icons.set(key, null);
+    }
+  }
+  const url = icons.get(key);
+  if (url && holder.isConnected) {
+    holder.replaceChildren(h("img", { src: url, alt: "", loading: "lazy" }));
+  }
+}
+
+function activeNames(): Set<string> {
+  return new Set(state.active.map((a) => a.name));
+}
+
+function renderLibrary() {
+  const mods = filteredMods();
+  const active = activeNames();
+  $("library-count").textContent =
+    mods.length === state.mods.length
+      ? `모드 ${state.mods.length}개`
+      : `모드 ${state.mods.length}개 중 ${mods.length}개 표시`;
+
+  const grid = $("grid");
+  if (mods.length === 0) {
+    grid.replaceChildren(
+      h("div", { class: "empty" }, state.mods.length ? "조건에 맞는 모드가 없습니다." : "모드가 없습니다."),
+    );
+    return;
+  }
+  grid.replaceChildren(...mods.map((m) => modCard(m, active.has(m.id))));
+}
+
+function modCard(m: Mod, isActive: boolean): HTMLElement {
+  const iconHolder = h("div", { class: "card-icon", "data-mod-id": m.id }, h("span", {}, "SCS"));
+  if (m.has_icon) {
+    const cached = icons.get(`${state.game}/${m.id}`);
+    if (cached) iconHolder.replaceChildren(h("img", { src: cached, alt: "" }));
+    else iconObserver.observe(iconHolder);
+  }
+
+  const categorySelect = h(
+    "select",
+    {
+      class: "cat-select",
+      title: "분류 변경",
+      "aria-label": "분류 변경",
+      onchange: (ev: Event) => {
+        const value = (ev.target as HTMLSelectElement).value;
+        void setOverride(m, value || null);
+      },
+    },
+    h("option", { value: "", selected: !m.category_override }, "자동 분류"),
+    ...state.constants.categories.map((c) =>
+      h("option", { value: c, selected: m.category_override === c }, catLabel(c)),
+    ),
+  );
+
+  const meta = [m.author, m.version && `v${m.version}`].filter(Boolean).join(" · ");
+  return h(
+    "article",
+    { class: "card" + (isActive ? " active" : "") + (m.error ? " broken" : ""), title: m.description ?? m.path },
+    iconHolder,
+    h(
+      "div",
+      { class: "card-body" },
+      h("div", { class: "card-title" }, m.display_name),
+      h("div", { class: "card-meta muted" }, meta || m.file_name),
+      h(
+        "div",
+        { class: "badges" },
+        ...m.categories.map((c) =>
+          h("span", { class: "badge cat" + (m.category_override ? " pinned" : "") }, catLabel(c)),
+        ),
+        h("span", { class: "badge src" }, m.source === "workshop" ? "창작마당" : "로컬"),
+        m.error ? h("span", { class: "badge err", title: m.error }, "읽기 실패") : null,
+      ),
+    ),
+    h(
+      "div",
+      { class: "card-actions" },
+      categorySelect,
+      h(
+        "button",
+        {
+          class: "btn small" + (isActive ? "" : " primary"),
+          onclick: () => void (isActive ? removeActive(m.id) : addActive(m)),
+        },
+        isActive ? "비활성화" : "활성화",
+      ),
+    ),
+  );
+}
+
+function renderOrder() {
+  const rowsEl = $("rows");
+  const { rows, misplaced } = state.layout;
+  const dirty = isDirty();
+
+  $("order-summary").textContent =
+    `활성 ${state.active.length}개` + (misplaced ? ` · 그룹에 맞지 않는 모드 ${misplaced}개` : "");
+  $<HTMLButtonElement>("auto-sort").disabled = misplaced === 0;
+  $<HTMLButtonElement>("revert").disabled = !dirty;
+  $<HTMLButtonElement>("save").disabled = !dirty || !state.profilePath;
+
+  // where a drop on each row lands: a header inserts before the next mod
+  let nextIndex = state.active.length;
+  const insertAt: number[] = new Array(rows.length);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+    if (row.kind === "mod") nextIndex = row.index;
+    insertAt[i] = nextIndex;
+  }
+  const counts = new Map<string, number>();
+  let currentGroup = "";
+  for (const row of rows) {
+    if (row.kind === "spacer") currentGroup = row.group_id;
+    else counts.set(currentGroup, (counts.get(currentGroup) ?? 0) + 1);
+  }
+
+  rowsEl.replaceChildren(
+    ...rows.map((row, i) => {
+      const el =
+        row.kind === "spacer"
+          ? h(
+              "div",
+              { class: "row spacer" },
+              h("span", {}, groupLabel(row.group_id)),
+              h("span", { class: "muted" }, String(counts.get(row.group_id) ?? 0)),
+            )
+          : orderRow(row, state.active[row.index]);
+      el.dataset.insertAt = String(insertAt[i]);
+      return el;
+    }),
+  );
+}
+
+function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLElement {
+  return h(
+    "div",
+    {
+      class: "row mod" + (row.misplaced ? " misplaced" : "") + (item.installed ? "" : " missing"),
+      draggable: "true",
+      "data-index": String(row.index),
+    },
+    h("span", { class: "grip", "aria-hidden": "true" }, "⋮⋮"),
+    h("span", { class: "row-name" }, item.display_name || item.name),
+    row.misplaced
+      ? h("span", { class: "badge warn" }, `→ ${groupLabel(row.expected_group_id)}`)
+      : null,
+    item.installed ? null : h("span", { class: "badge err" }, "미설치"),
+    h(
+      "button",
+      { class: "icon-btn", title: "비활성화", "aria-label": "비활성화", onclick: () => void removeActive(item.name) },
+      "✕",
+    ),
+  );
+}
+
+// -------------------------------------------------------------- actions
+
+async function addActive(m: Mod) {
+  if (activeNames().has(m.id)) return;
+  // new mods go on top; the layout flags them if that is the wrong group
+  state.active.unshift({
+    name: m.id,
+    display_name: m.display_name,
+    token: m.group_token,
+    installed: true,
+  });
+  await relayout();
+}
+
+async function removeActive(name: string) {
+  state.active = state.active.filter((a) => a.name !== name);
+  await relayout();
+}
+
+async function moveActive(from: number, insertAt: number) {
+  if (from < 0 || from >= state.active.length) return;
+  const target = insertAt > from ? insertAt - 1 : insertAt;
+  if (target === from) return;
+  const [item] = state.active.splice(from, 1);
+  state.active.splice(target, 0, item);
+  await relayout();
+}
+
+async function autoSort() {
+  const order = await invoke<number[]>("auto_sort", {
+    tokens: state.active.map((a) => a.token),
+  });
+  state.active = order.map((i) => state.active[i]);
+  await relayout();
+  setStatus("모든 모드를 각자의 그룹으로 정렬했습니다. 그룹 안의 순서는 그대로입니다. 저장해야 게임에 반영됩니다.");
+}
+
+async function revert() {
+  state.active = JSON.parse(state.saved) as ActiveItem[];
+  await relayout();
+  setStatus("변경 사항을 되돌렸습니다.");
+}
+
+async function save() {
+  if (!state.profilePath || !isDirty()) return;
+  const game = state.game.toUpperCase();
+  const ok = await confirmModal(
+    "로드 순서 저장",
+    `프로필의 활성 모드 목록을 덮어씁니다. 저장 전에 프로필 폴더 전체를 자동으로 백업합니다. ${game}가 실행 중이면 먼저 종료하세요. 게임이 종료할 때 프로필을 다시 써서 변경 사항이 사라질 수 있습니다.`,
+    "저장",
+  );
+  if (!ok) return;
+  try {
+    const backup = await invoke<string>("save_load_order", {
+      game: state.game,
+      profilePath: state.profilePath,
+      items: state.active,
+    });
+    state.saved = JSON.stringify(state.active);
+    const profile = state.profiles.find((p) => p.path === state.profilePath);
+    if (profile) profile.active_count = state.active.length;
+    renderProfileSelect();
+    renderOrder();
+    setStatus(`저장했습니다. 백업: ${backup}`, "ok");
+  } catch (e) {
+    setStatus(`저장 실패: ${errorText(e)}`, "error");
+  }
+}
+
+async function setOverride(m: Mod, token: string | null) {
+  try {
+    await invoke("set_category_override", { game: state.game, id: m.id, token });
+    // categories feed both the cards and the list's group tokens
+    state.mods = await invoke<Mod[]>("scan_mods", { game: state.game });
+    const savedItems = JSON.parse(state.saved) as ActiveItem[];
+    const resolveItems = (items: ActiveItem[]) =>
+      invoke<ActiveItem[]>("resolve_items", {
+        game: state.game,
+        items: items.map(({ name, display_name }) => ({ name, display_name })),
+      });
+    const [active, saved] = await Promise.all([resolveItems(state.active), resolveItems(savedItems)]);
+    state.active = active;
+    state.saved = JSON.stringify(saved);
+    await relayout();
+    setStatus(
+      token
+        ? `'${m.display_name}'의 분류를 ${catLabel(token)}(으)로 고정했습니다.`
+        : `'${m.display_name}'의 분류를 자동으로 되돌렸습니다.`,
+      "ok",
+    );
+  } catch (e) {
+    setStatus(errorText(e), "error");
+  }
+}
+
+// ---------------------------------------------------------- drag & drop
+
+function setupDragAndDrop() {
+  const rowsEl = $("rows");
+  let dragIndex = -1;
+
+  const rowOf = (ev: Event) => (ev.target as HTMLElement).closest<HTMLElement>(".row");
+  const clearMarks = () =>
+    rowsEl.querySelectorAll(".drop-before").forEach((el) => el.classList.remove("drop-before"));
+
+  rowsEl.addEventListener("dragstart", (ev) => {
+    const row = rowOf(ev);
+    if (!row || row.dataset.index === undefined) return;
+    dragIndex = Number(row.dataset.index);
+    row.classList.add("dragging");
+    ev.dataTransfer?.setData("text/plain", row.dataset.index);
+    if (ev.dataTransfer) ev.dataTransfer.effectAllowed = "move";
+  });
+  rowsEl.addEventListener("dragend", () => {
+    dragIndex = -1;
+    clearMarks();
+    rowsEl.querySelectorAll(".dragging").forEach((el) => el.classList.remove("dragging"));
+  });
+  rowsEl.addEventListener("dragover", (ev) => {
+    if (dragIndex < 0) return;
+    const row = rowOf(ev);
+    if (!row) return;
+    ev.preventDefault();
+    clearMarks();
+    row.classList.add("drop-before");
+  });
+  rowsEl.addEventListener("drop", (ev) => {
+    const row = rowOf(ev);
+    if (dragIndex < 0 || !row) return;
+    ev.preventDefault();
+    const from = dragIndex;
+    dragIndex = -1;
+    void moveActive(from, Number(row.dataset.insertAt));
+  });
+}
+
+// ----------------------------------------------------------------- boot
+
+function bindControls() {
+  const filter = state.filter;
+  $<HTMLInputElement>("search").addEventListener("input", (ev) => {
+    filter.q = (ev.target as HTMLInputElement).value;
+    renderLibrary();
+  });
+  const bindSelect = (id: string, key: "category" | "source" | "sort") =>
+    $<HTMLSelectElement>(id).addEventListener("change", (ev) => {
+      filter[key] = (ev.target as HTMLSelectElement).value;
+      renderLibrary();
+    });
+  bindSelect("filter-category", "category");
+  bindSelect("filter-source", "source");
+  bindSelect("sort", "sort");
+
+  $<HTMLSelectElement>("profile-select").addEventListener("change", async (ev) => {
+    const select = ev.target as HTMLSelectElement;
+    if (isDirty() && !(await confirmDiscard())) {
+      select.value = state.profilePath;
+      return;
+    }
+    state.profilePath = select.value;
+    try {
+      await loadProfile();
+    } catch (e) {
+      setStatus(errorText(e), "error");
+    }
+  });
+
+  $("rescan").addEventListener("click", async () => {
+    if (isDirty() && !(await confirmDiscard())) return;
+    icons.clear();
+    await loadGame(state.game);
+  });
+  $("auto-sort").addEventListener("click", () => void autoSort());
+  $("revert").addEventListener("click", () => void revert());
+  $("save").addEventListener("click", () => void save());
+}
+
+async function boot() {
+  bindControls();
+  setupDragAndDrop();
+  try {
+    [state.constants, state.installs] = await Promise.all([
+      invoke<Constants>("constants"),
+      invoke<InstallInfo[]>("get_installs"),
+    ]);
+  } catch (e) {
+    setStatus(errorText(e), "error");
+    return;
+  }
+  $("filter-category").replaceChildren(
+    h("option", { value: "" }, "모든 분류"),
+    ...state.constants.categories.map((c) => h("option", { value: c }, catLabel(c))),
+  );
+  if (state.installs.length === 0) {
+    renderGameSwitch();
+    renderAll();
+    setStatus("ETS2 / ATS 데이터 폴더를 찾지 못했습니다.", "error");
+    return;
+  }
+  const first = state.installs.find((i) => i.game === "ets2") ?? state.installs[0];
+  await loadGame(first.game);
+}
+
+void boot();

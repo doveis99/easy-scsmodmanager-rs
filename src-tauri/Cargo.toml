@@ -1,0 +1,20 @@
+[package]
+name = "easy-scsmodmanager"
+description = "Mod and load-order manager for Euro Truck Simulator 2 and American Truck Simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "easy_scsmodmanager_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+scsmm-core = { path = "../crates/scsmm-core" }

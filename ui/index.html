@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Easy SCS Mod Manager</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">Easy SCS Mod Manager</div>
+      <div class="seg" id="game-switch" role="tablist" aria-label="게임"></div>
+      <label class="field">
+        <span>프로필</span>
+        <select id="profile-select"></select>
+      </label>
+      <div class="spacer"></div>
+      <span class="muted" id="game-version"></span>
+      <button id="rescan" class="btn">다시 스캔</button>
+    </header>
+
+    <main class="panes">
+      <section class="pane library" aria-label="모드 라이브러리">
+        <div class="toolbar">
+          <input id="search" type="search" placeholder="이름, 제작자, 분류 검색" />
+          <select id="filter-category" aria-label="분류"></select>
+          <select id="filter-source" aria-label="출처">
+            <option value="">모든 출처</option>
+            <option value="local">로컬</option>
+            <option value="workshop">창작마당</option>
+          </select>
+          <select id="sort" aria-label="정렬">
+            <option value="name">이름순</option>
+            <option value="date">설치일순</option>
+          </select>
+        </div>
+        <div class="count muted" id="library-count"></div>
+        <div class="grid" id="grid"></div>
+      </section>
+
+      <section class="pane order" aria-label="활성 모드 로드 순서">
+        <div class="toolbar">
+          <strong class="pane-title">로드 순서</strong>
+          <div class="spacer"></div>
+          <button id="auto-sort" class="btn">자동 정렬</button>
+          <button id="revert" class="btn" disabled>되돌리기</button>
+          <button id="save" class="btn primary" disabled>저장</button>
+        </div>
+        <div class="count" id="order-summary"></div>
+        <div class="hint muted">위쪽일수록 나중에 로드되어 우선순위가 높습니다. 끌어서 순서를 바꿀 수 있습니다.</div>
+        <div class="rows" id="rows"></div>
+      </section>
+    </main>
+
+    <footer class="status" id="status" role="status"></footer>
+
+    <div class="modal-backdrop" id="modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <h2 id="modal-title"></h2>
+        <p id="modal-body"></p>
+        <div class="modal-actions">
+          <button id="modal-cancel" class="btn">취소</button>
+          <button id="modal-ok" class="btn primary">확인</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
