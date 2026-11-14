@@ -428,6 +428,118 @@ pub fn create_backup(sii_path: &Path, root: &Path) -> Result<BackupEntry> {
     })
 }
 
+fn backup_dir_for(sii_path: &Path, root: &Path) -> Result<PathBuf> {
+    let name = sii_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .ok_or_else(|| format_err("profile path has no directory name"))?;
+    Ok(root.join(name))
+}
+
+/// Backups of this profile, newest first.
+pub fn list_backups(sii_path: &Path, root: &Path) -> Vec<BackupEntry> {
+    let Ok(dir) = backup_dir_for(sii_path, root) else {
+        return Vec::new();
+    };
+    let profile_dir_name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut entries: Vec<BackupEntry> = fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")))
+                .map(|path| BackupEntry {
+                    // file names are `YYYY-MM-DD_HH-MM-SS[_n].zip`
+                    timestamp: path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    size_bytes: fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+                    profile_dir_name: profile_dir_name.clone(),
+                    path,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // the timestamp format sorts chronologically as text
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    entries
+}
+
+/// Resolve `backup_path` to one of this profile's own backups. Anything
+/// else - another profile's backup, a path outside the backup root - is
+/// refused, so a restore or delete can never be pointed at a stray file.
+fn own_backup(sii_path: &Path, root: &Path, backup_path: &Path) -> Result<BackupEntry> {
+    list_backups(sii_path, root)
+        .into_iter()
+        .find(|b| b.path == backup_path)
+        .ok_or_else(|| Error::NotFound(format!("not a backup of this profile: {}", backup_path.display())))
+}
+
+/// Extract a backup over the profile directory of `sii_path`.
+///
+/// The current state is backed up first, so a restore can itself be
+/// undone. Existing files are overwritten; files that are not in the
+/// backup are left alone. Returns the safety backup that was taken.
+pub fn restore_backup(sii_path: &Path, root: &Path, backup_path: &Path) -> Result<BackupEntry> {
+    let backup = own_backup(sii_path, root, backup_path)?;
+    let profile_dir = sii_path
+        .parent()
+        .ok_or_else(|| format_err("profile path has no parent directory"))?;
+
+    // read the whole archive before touching the profile: a corrupt backup
+    // must fail here, not halfway through overwriting files
+    let mut archive = zip::ZipArchive::new(File::open(&backup.path)?)?;
+    let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        if entry.is_dir() {
+            continue;
+        }
+        // `enclosed_name` refuses absolute paths and `..` components
+        let rel = entry
+            .enclosed_name()
+            .ok_or_else(|| format_err(format!("unsafe path in backup: {}", entry.name())))?;
+        let mut data = Vec::with_capacity(entry.size().min(1 << 24) as usize);
+        std::io::Read::read_to_end(&mut entry, &mut data)?;
+        files.push((rel, data));
+    }
+    if !files.iter().any(|(rel, _)| rel == Path::new(PROFILE_FILE_NAME)) {
+        return Err(format_err("backup does not contain a profile.sii"));
+    }
+
+    let safety = create_backup(sii_path, root)?;
+    for (rel, data) in files {
+        let target = profile_dir.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(target, data)?;
+    }
+    Ok(safety)
+}
+
+pub fn delete_backup(sii_path: &Path, root: &Path, backup_path: &Path) -> Result<()> {
+    let backup = own_backup(sii_path, root, backup_path)?;
+    fs::remove_file(backup.path)?;
+    Ok(())
+}
+
+/// Keep the newest `keep` backups of this profile and delete the rest.
+/// `keep == 0` keeps everything. Returns how many were removed.
+pub fn prune_backups(sii_path: &Path, root: &Path, keep: u32) -> usize {
+    if keep == 0 {
+        return 0;
+    }
+    list_backups(sii_path, root)
+        .into_iter()
+        .skip(keep as usize)
+        .filter(|b| fs::remove_file(&b.path).is_ok())
+        .count()
+}
+
 /// Back up the profile, then write the new active list. The backup holds
 /// the pre-edit profile, so one is always recoverable.
 pub fn save_active_mods(
@@ -535,5 +647,94 @@ mod tests {
         assert_eq!(old, PROFILE);
         // no temp files left behind
         assert_eq!(fs::read_dir(&pdir).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn backups_list_restore_prune() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pdir = tmp.path().join("profiles").join("4A6F");
+        fs::create_dir_all(pdir.join("save").join("1")).unwrap();
+        let sii = pdir.join("profile.sii");
+        fs::write(&sii, PROFILE).unwrap();
+        fs::write(pdir.join("save").join("1").join("game.sii"), b"save one").unwrap();
+        let root = tmp.path().join("backups");
+
+        assert!(list_backups(&sii, &root).is_empty());
+        let first = create_backup(&sii, &root).unwrap();
+
+        // change the profile, add a file the backup does not know
+        fs::write(&sii, "changed").unwrap();
+        fs::write(pdir.join("save").join("1").join("game.sii"), b"changed save").unwrap();
+        fs::write(pdir.join("new.txt"), b"keep me").unwrap();
+
+        let safety = restore_backup(&sii, &root, &first.path).unwrap();
+        assert_eq!(fs::read_to_string(&sii).unwrap(), PROFILE);
+        assert_eq!(fs::read(pdir.join("save").join("1").join("game.sii")).unwrap(), b"save one");
+        assert_eq!(fs::read(pdir.join("new.txt")).unwrap(), b"keep me");
+
+        // the restore took a safety backup of the changed state, newest first
+        let listed = list_backups(&sii, &root);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].path, safety.path);
+        assert_eq!(listed[1].path, first.path);
+        let mut z = zip::ZipArchive::new(File::open(&safety.path).unwrap()).unwrap();
+        let mut held = String::new();
+        std::io::Read::read_to_string(&mut z.by_name("profile.sii").unwrap(), &mut held).unwrap();
+        assert_eq!(held, "changed");
+
+        // pruning keeps the newest, 0 keeps all
+        assert_eq!(prune_backups(&sii, &root, 0), 0);
+        assert_eq!(prune_backups(&sii, &root, 1), 1);
+        let left = list_backups(&sii, &root);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].path, safety.path);
+
+        delete_backup(&sii, &root, &safety.path).unwrap();
+        assert!(list_backups(&sii, &root).is_empty());
+    }
+
+    #[test]
+    fn backups_of_other_profiles_and_stray_files_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("backups");
+        let mut siis = Vec::new();
+        for name in ["4A6F", "4B6F"] {
+            let pdir = tmp.path().join("profiles").join(name);
+            fs::create_dir_all(&pdir).unwrap();
+            fs::write(pdir.join("profile.sii"), PROFILE).unwrap();
+            siis.push(pdir.join("profile.sii"));
+        }
+        let other = create_backup(&siis[1], &root).unwrap();
+        assert!(restore_backup(&siis[0], &root, &other.path).is_err());
+        assert!(delete_backup(&siis[0], &root, &other.path).is_err());
+        assert!(other.path.is_file());
+
+        let stray = tmp.path().join("stray.zip");
+        fs::write(&stray, b"x").unwrap();
+        assert!(restore_backup(&siis[0], &root, &stray).is_err());
+        assert!(delete_backup(&siis[0], &root, &stray).is_err());
+        assert!(stray.is_file());
+    }
+
+    #[test]
+    fn a_backup_without_a_profile_is_not_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pdir = tmp.path().join("profiles").join("4A6F");
+        fs::create_dir_all(&pdir).unwrap();
+        let sii = pdir.join("profile.sii");
+        fs::write(&sii, PROFILE).unwrap();
+        let root = tmp.path().join("backups");
+        let dir = root.join("4A6F");
+        fs::create_dir_all(&dir).unwrap();
+        let bogus = dir.join("2020-01-01_00-00-00.zip");
+        let mut zw = zip::ZipWriter::new(File::create(&bogus).unwrap());
+        zw.start_file("controls.sii", zip::write::SimpleFileOptions::default()).unwrap();
+        zw.write_all(b"x").unwrap();
+        zw.finish().unwrap();
+
+        assert!(restore_backup(&sii, &root, &bogus).is_err());
+        assert_eq!(fs::read_to_string(&sii).unwrap(), PROFILE);
+        // nothing was written and no safety backup was taken for a refused restore
+        assert_eq!(list_backups(&sii, &root).len(), 1);
     }
 }

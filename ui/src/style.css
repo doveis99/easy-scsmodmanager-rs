@@ -80,6 +80,13 @@ input {
   font-weight: 600;
 }
 
+.btn.danger {
+  background: var(--err);
+  border-color: var(--err);
+  color: #1c0606;
+  font-weight: 600;
+}
+
 .btn.small {
   padding: 3px 8px;
   font-size: 12px;
@@ -254,6 +261,13 @@ input[type="search"] {
 }
 
 .card-title {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -274,6 +288,39 @@ input[type="search"] {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+}
+
+.card-title:hover {
+  text-decoration: underline;
+}
+
+.card-actions-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.star {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 17px;
+  line-height: 1;
+  color: var(--muted);
+}
+
+.star.on {
+  color: var(--accent);
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
 .cat-select {
@@ -486,24 +533,163 @@ input[type="search"] {
   font-size: 16px;
 }
 
-.modal p {
+.modal-body {
   margin: 0 0 18px;
+  max-height: 70vh;
+  overflow: auto;
   line-height: 1.55;
   color: var(--muted);
+  white-space: pre-line;
+}
+
+.modal-body > * {
+  white-space: normal;
 }
 
 .modal-backdrop.wide .modal {
   width: min(760px, calc(100vw - 32px));
 }
 
-.modal p.pre {
+.modal-body.pre {
   max-height: 60vh;
-  overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--text);
+  user-select: text;
+}
+
+/* ----------------------------------------------- dialog contents */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--text);
+}
+
+.form h3 {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 4px;
+}
+
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.form-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.form-note {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.form-error {
+  color: var(--err);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.form-error:empty {
+  display: none;
+}
+
+.form input[type="text"],
+.form input[type="number"],
+.form textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  user-select: text;
+}
+
+.form input[type="number"] {
+  width: 110px;
+}
+
+.form textarea {
+  resize: vertical;
+  font: inherit;
+}
+
+.backup-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.backup-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.backup-time {
+  flex: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.detail {
+  color: var(--text);
+}
+
+.detail-icon {
+  float: right;
+  width: 180px;
+  max-width: 40%;
+  margin: 0 0 10px 14px;
+  border-radius: 6px;
+}
+
+.detail dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 14px;
+  margin: 0 0 12px;
+}
+
+.detail dt {
+  color: var(--muted);
+  font-size: 12px;
+  padding-top: 1px;
+}
+
+.detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.detail-desc {
+  clear: both;
+  padding: 10px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--panel-2);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
   user-select: text;
 }
 

@@ -14,8 +14,10 @@
         <span>프로필</span>
         <select id="profile-select"></select>
       </label>
+      <button id="open-backups" class="btn">백업</button>
       <div class="spacer"></div>
       <span class="muted" id="game-version"></span>
+      <button id="open-settings" class="btn">설정</button>
       <button id="rescan" class="btn">다시 스캔</button>
     </header>
 
@@ -33,6 +35,7 @@
             <option value="name">이름순</option>
             <option value="date">설치일순</option>
           </select>
+          <label class="check"><input type="checkbox" id="filter-favorites" /> 즐겨찾기</label>
         </div>
         <div class="count muted" id="library-count"></div>
         <div class="grid" id="grid"></div>
@@ -58,11 +61,8 @@
     <div class="modal-backdrop" id="modal" hidden>
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
         <h2 id="modal-title"></h2>
-        <p id="modal-body"></p>
-        <div class="modal-actions">
-          <button id="modal-cancel" class="btn">취소</button>
-          <button id="modal-ok" class="btn primary">확인</button>
-        </div>
+        <div id="modal-body" class="modal-body"></div>
+        <div id="modal-actions" class="modal-actions"></div>
       </div>
     </div>
 

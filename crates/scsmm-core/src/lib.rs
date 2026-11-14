@@ -17,6 +17,7 @@ pub mod manifest;
 pub mod profile;
 pub mod scanner;
 pub mod scs;
+pub mod settings;
 pub mod sii;
 pub mod steam;
 pub mod workshop;

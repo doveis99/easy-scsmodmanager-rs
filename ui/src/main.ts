@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { $, confirmModal, dismissDialog, h, infoModal, openDialog } from "./dom";
 
 // ---------------------------------------------------------------- types
 
@@ -11,6 +12,7 @@ interface InstallInfo {
   documents_dir: string;
   workshop_dir: string | null;
   version: string | null;
+  manual: boolean;
 }
 
 interface Mod {
@@ -34,6 +36,7 @@ interface Mod {
   compatible_versions: string[];
   compat: Compat;
   has_icon: boolean;
+  favorite: boolean;
 }
 
 interface Profile {
@@ -71,6 +74,44 @@ interface ConflictReport {
   overrides: Record<string, ModOverride>;
   /** Files shared by so many mods that the overlap is normal, not a conflict. */
   frequent: Record<string, { file: string; owners: number }[]>;
+}
+
+interface GameSettings {
+  documents_dir: string | null;
+  workshop_dir: string | null;
+  last_profile: string | null;
+}
+
+interface Settings {
+  workshop_lookup: boolean;
+  backup_keep: number;
+  map_base_names: string[];
+  last_game: GameId | null;
+  ets2: GameSettings;
+  ats: GameSettings;
+}
+
+interface SettingsView {
+  settings: Settings;
+  detected: Partial<Record<GameId, { documents_dir: string | null; workshop_dir: string | null }>>;
+  backup_root: string;
+}
+
+interface BackupDto {
+  path: string;
+  timestamp: string;
+  size_bytes: number;
+}
+
+interface SaveResult {
+  backup: string;
+  pruned: number;
+}
+
+interface DeleteResult {
+  deleted: string[];
+  failed: { id: string; error: string }[];
+  skipped_workshop: number;
 }
 
 interface WorkshopFetch {
@@ -140,46 +181,13 @@ const state = {
   saved: "[]",
   layout: { rows: [], misplaced: 0 } as Layout,
   conflicts: { overrides: {}, frequent: {} } as ConflictReport,
-  filter: { q: "", category: "", source: "", sort: "name" },
+  filter: { q: "", category: "", source: "", sort: "name", favorites: false },
+  settings: null as SettingsView | null,
   /** Bumped per load so a slow response for an old game/profile is dropped. */
   epoch: 0,
 };
 
 const icons = new Map<string, string | null>();
-
-// ------------------------------------------------------------ dom utils
-
-function $<T extends HTMLElement>(id: string): T {
-  const el = document.getElementById(id);
-  if (!el) throw new Error(`missing element #${id}`);
-  return el as T;
-}
-
-type Child = Node | string | null | undefined | false;
-
-/** Build an element. Text always goes through textContent: mod names and
- *  descriptions come from untrusted archives. */
-function h<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  props: Partial<Record<string, string | boolean | ((ev: Event) => void)>> = {},
-  ...children: Child[]
-): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (typeof value === "function") {
-      el.addEventListener(key.replace(/^on/, ""), value as EventListener);
-    } else if (typeof value === "boolean") {
-      if (value) el.setAttribute(key, "");
-    } else if (value !== undefined) {
-      el.setAttribute(key, value);
-    }
-  }
-  for (const child of children) {
-    if (child === null || child === undefined || child === false) continue;
-    el.append(child);
-  }
-  return el;
-}
 
 function setStatus(message: string, kind: "info" | "error" | "ok" = "info") {
   const el = $("status");
@@ -189,44 +197,6 @@ function setStatus(message: string, kind: "info" | "error" | "ok" = "info") {
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
-}
-
-function confirmModal(title: string, body: string, okLabel: string): Promise<boolean> {
-  return openModal(title, body, okLabel, false);
-}
-
-/** A read-only report: preformatted, selectable text and a single button. */
-function infoModal(title: string, body: string): Promise<boolean> {
-  return openModal(title, body, "닫기", true);
-}
-
-function openModal(title: string, body: string, okLabel: string, info: boolean): Promise<boolean> {
-  return new Promise((resolve) => {
-    const modal = $("modal");
-    $("modal-title").textContent = title;
-    const bodyEl = $("modal-body");
-    bodyEl.textContent = body;
-    bodyEl.classList.toggle("pre", info);
-    modal.classList.toggle("wide", info);
-    const ok = $<HTMLButtonElement>("modal-ok");
-    const cancel = $<HTMLButtonElement>("modal-cancel");
-    cancel.hidden = info;
-    ok.textContent = okLabel;
-    const close = (answer: boolean) => {
-      modal.hidden = true;
-      ok.onclick = cancel.onclick = null;
-      document.removeEventListener("keydown", onKey);
-      resolve(answer);
-    };
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === "Escape") close(false);
-    };
-    ok.onclick = () => close(true);
-    cancel.onclick = () => close(false);
-    document.addEventListener("keydown", onKey);
-    modal.hidden = false;
-    ok.focus();
-  });
 }
 
 // -------------------------------------------------------------- loading
@@ -263,9 +233,12 @@ async function loadGame(game: GameId) {
       (a, b) => (a && a.active_count >= b.active_count ? a : b),
       null,
     );
-    state.profilePath = best?.path ?? "";
+    // reopen the profile used last time if it is still there
+    const last = state.settings?.settings[game].last_profile;
+    state.profilePath = usable.find((p) => p.path === last)?.path ?? best?.path ?? "";
     renderProfileSelect();
     await loadProfile();
+    rememberPlace();
     const unreadable = mods.filter((m) => m.error).length;
     const ms = Math.round(performance.now() - started);
     setStatus(
@@ -304,6 +277,15 @@ async function refreshWorkshop() {
   } catch (e) {
     console.warn("workshop lookup failed:", errorText(e));
   }
+}
+
+/** Note the current game and profile for the next start (best effort). */
+function rememberPlace() {
+  const game = state.game;
+  const profilePath = state.profilePath || null;
+  const gs = state.settings?.settings[game];
+  if (gs && profilePath) gs.last_profile = profilePath;
+  invoke("remember_place", { game, profilePath }).catch(() => {});
 }
 
 async function loadProfile() {
@@ -485,11 +467,12 @@ function renderProfileSelect() {
 }
 
 function filteredMods(): Mod[] {
-  const { q, category, source, sort } = state.filter;
+  const { q, category, source, sort, favorites } = state.filter;
   const needle = q.trim().toLowerCase();
   const out = state.mods.filter((m) => {
     if (category && !m.categories.includes(category)) return false;
     if (source && m.source !== source) return false;
+    if (favorites && !m.favorite) return false;
     if (!needle) return true;
     const hay = [m.display_name, m.author, m.file_name, ...m.categories.map(catLabel), ...m.categories]
       .join("\n")
@@ -588,7 +571,7 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
     h(
       "div",
       { class: "card-body" },
-      h("div", { class: "card-title" }, m.display_name),
+      h("button", { class: "card-title", title: "상세 보기", onclick: () => void openDetails(m) }, m.display_name),
       h("div", { class: "card-meta muted" }, meta || m.file_name),
       h(
         "div",
@@ -606,7 +589,22 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
     h(
       "div",
       { class: "card-actions" },
-      categorySelect,
+      h(
+        "div",
+        { class: "card-actions-left" },
+        h(
+          "button",
+          {
+            class: "star" + (m.favorite ? " on" : ""),
+            title: m.favorite ? "즐겨찾기 해제" : "즐겨찾기",
+            "aria-label": m.favorite ? "즐겨찾기 해제" : "즐겨찾기",
+            "aria-pressed": String(m.favorite),
+            onclick: () => void toggleFavorite(m),
+          },
+          m.favorite ? "★" : "☆",
+        ),
+        categorySelect,
+      ),
       h(
         "button",
         {
@@ -761,7 +759,7 @@ async function save() {
   );
   if (!ok) return;
   try {
-    const backup = await invoke<string>("save_load_order", {
+    const result = await invoke<SaveResult>("save_load_order", {
       game: state.game,
       profilePath: state.profilePath,
       items: activeEntries(),
@@ -771,7 +769,10 @@ async function save() {
     if (profile) profile.active_count = state.active.length;
     renderProfileSelect();
     renderOrder();
-    setStatus(`저장했습니다. 백업: ${backup}`, "ok");
+    setStatus(
+      `저장했습니다. 백업: ${result.backup}` + (result.pruned ? ` (오래된 백업 ${result.pruned}개 정리)` : ""),
+      "ok",
+    );
   } catch (e) {
     setStatus(`저장 실패: ${errorText(e)}`, "error");
   }
@@ -900,6 +901,360 @@ function setupReordering() {
   });
 }
 
+// ------------------------------------------------------------- managing
+
+function fmtSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** `2026-11-14_23-51-57[_1]` -> `2026-11-14 23:51:57`. */
+function fmtStamp(stamp: string): string {
+  const m = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})/.exec(stamp);
+  return m ? `${m[1]} ${m[2]}:${m[3]}:${m[4]}` : stamp;
+}
+
+/** Re-resolve both the edited and the saved list against the current scan
+ *  (after a mod disappeared), so the dirty check stays meaningful. */
+async function resolveLists() {
+  const savedItems = JSON.parse(state.saved) as ActiveItem[];
+  const resolveItems = (items: ActiveItem[]) =>
+    invoke<ActiveItem[]>("resolve_items", { game: state.game, items: activeEntries(items) });
+  const [active, saved] = await Promise.all([resolveItems(state.active), resolveItems(savedItems)]);
+  state.active = active;
+  state.saved = JSON.stringify(saved);
+  await relayout();
+}
+
+async function toggleFavorite(m: Mod) {
+  try {
+    await invoke("set_favorite", { game: state.game, id: m.id, favorite: !m.favorite });
+    m.favorite = !m.favorite;
+    renderLibrary();
+  } catch (e) {
+    setStatus(errorText(e), "error");
+  }
+}
+
+type DetailAction = "close" | "reveal" | "workshop" | "delete";
+
+async function openDetails(m: Mod) {
+  const icon = icons.get(`${state.game}/${m.id}`);
+  const rows: [string, string][] = [
+    ["제작자", m.author || "-"],
+    ["버전", m.version || "-"],
+    ["분류", m.categories.map(catLabel).join(", ") + (m.category_override ? " (수동 고정)" : "")],
+    ["모드가 선언한 분류", m.manifest_categories.join(", ") || "-"],
+    ["출처", m.source === "workshop" ? "Steam 창작마당" : "로컬 모드 폴더"],
+    ["형식", m.format],
+    ["호환 버전", m.compatible_versions.join(", ") || "선언 없음"],
+    ["설치일", m.installed_at ? new Date(m.installed_at * 1000).toLocaleString("ko-KR") : "-"],
+    ["파일", m.path],
+  ];
+  if (m.error) rows.push(["읽기 오류", m.error]);
+  const error = h("div", { class: "form-error", role: "alert" });
+  const body = h(
+    "div",
+    { class: "detail" },
+    icon ? h("img", { class: "detail-icon", src: icon, alt: "" }) : null,
+    h("dl", {}, ...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
+    m.description ? h("div", { class: "detail-desc" }, m.description) : null,
+    error,
+  );
+  const buttons: { label: string; value: DetailAction; kind?: "primary" | "danger" }[] = [
+    { label: "닫기", value: "close" },
+    { label: "파일 위치 열기", value: "reveal" },
+  ];
+  if (m.source === "workshop") buttons.push({ label: "창작마당 페이지", value: "workshop" });
+  else buttons.push({ label: "휴지통으로 삭제", value: "delete", kind: "danger" });
+
+  const action = await openDialog<DetailAction>({
+    title: m.display_name,
+    body,
+    wide: true,
+    dismiss: "close",
+    buttons,
+    beforeClose: async (value) => {
+      if (value !== "reveal" && value !== "workshop") return;
+      try {
+        await invoke(value === "reveal" ? "reveal_mod" : "open_workshop_page", { game: state.game, id: m.id });
+      } catch (e) {
+        error.textContent = errorText(e);
+      }
+      return false; // these act on the mod and keep the dialog open
+    },
+  });
+  if (action === "delete") await deleteMod(m);
+}
+
+async function deleteMod(m: Mod) {
+  const game = state.game;
+  let users: string[] = [];
+  try {
+    users = (await invoke<Record<string, string[]>>("mod_usage", { game, ids: [m.id] }))[m.id] ?? [];
+  } catch (e) {
+    setStatus(errorText(e), "error");
+    return;
+  }
+  const ok = await confirmModal(
+    "모드 삭제",
+    `'${m.display_name}' 파일을 휴지통으로 옮깁니다. 휴지통에서 복원할 수 있습니다.` +
+      (users.length
+        ? `\n\n이 모드는 다음 프로필의 로드 순서에 들어 있습니다: ${users.join(", ")}\n삭제해도 로드 순서에서는 빠지지 않고 '미설치'로 표시됩니다.`
+        : ""),
+    "휴지통으로 이동",
+    true,
+  );
+  if (!ok) return;
+  try {
+    const r = await invoke<DeleteResult>("delete_mods", { game, ids: [m.id] });
+    if (r.deleted.length === 0) {
+      setStatus(`삭제하지 못했습니다: ${r.failed[0]?.error ?? "알 수 없는 오류"}`, "error");
+      return;
+    }
+    state.mods = state.mods.filter((x) => !r.deleted.includes(x.id));
+    await resolveLists();
+    setStatus(`'${m.display_name}'을(를) 휴지통으로 옮겼습니다.`, "ok");
+  } catch (e) {
+    setStatus(errorText(e), "error");
+  }
+}
+
+async function openBackups() {
+  const game = state.game;
+  const profilePath = state.profilePath;
+  if (!profilePath) {
+    setStatus("선택된 프로필이 없습니다.", "error");
+    return;
+  }
+  const profileName = state.profiles.find((p) => p.path === profilePath)?.profile_name ?? "";
+  const list = h("div", { class: "backup-list" });
+  const footer = h("div", { class: "form-note" });
+  const error = h("div", { class: "form-error", role: "alert" });
+  let restore: BackupDto | null = null;
+
+  const refresh = async () => {
+    const backups = await invoke<BackupDto[]>("list_backups", { game, profilePath });
+    list.replaceChildren(
+      ...(backups.length
+        ? backups.map((b) => {
+            const del = h("button", { class: "btn small" }, "삭제");
+            // deleting a backup cannot be undone: ask for a second click
+            del.addEventListener("click", async () => {
+              if (del.dataset.armed !== "1") {
+                del.dataset.armed = "1";
+                del.textContent = "정말 삭제";
+                del.classList.add("danger");
+                return;
+              }
+              try {
+                await invoke("delete_backup", { game, profilePath, backupPath: b.path });
+                await refresh();
+              } catch (e) {
+                error.textContent = errorText(e);
+              }
+            });
+            return h(
+              "div",
+              { class: "backup-row" },
+              h("span", { class: "backup-time" }, fmtStamp(b.timestamp)),
+              h("span", { class: "muted" }, fmtSize(b.size_bytes)),
+              h(
+                "button",
+                {
+                  class: "btn small",
+                  onclick: () => {
+                    restore = b;
+                    dismissDialog();
+                  },
+                },
+                "복원",
+              ),
+              del,
+            );
+          })
+        : [h("div", { class: "empty" }, "아직 백업이 없습니다. 로드 순서를 저장하면 자동으로 만들어집니다.")]),
+    );
+    const total = backups.reduce((sum, b) => sum + b.size_bytes, 0);
+    const keep = state.settings?.settings.backup_keep ?? 0;
+    footer.textContent =
+      `백업 ${backups.length}개 · 합계 ${fmtSize(total)} · ` +
+      (keep ? `프로필당 최근 ${keep}개만 보관` : "개수 제한 없이 보관") +
+      (state.settings ? `\n위치: ${state.settings.backup_root}` : "");
+  };
+
+  try {
+    await refresh();
+  } catch (e) {
+    setStatus(errorText(e), "error");
+    return;
+  }
+  await openDialog<void>({
+    title: `프로필 백업 — ${profileName}`,
+    body: h("div", { class: "form" }, list, footer, error),
+    wide: true,
+    dismiss: undefined,
+    buttons: [{ label: "닫기", value: undefined, kind: "primary" }],
+  });
+  const chosen = restore as BackupDto | null;
+  if (!chosen) return;
+
+  const ok = await confirmModal(
+    "백업 복원",
+    `${fmtStamp(chosen.timestamp)} 백업으로 프로필 '${profileName}'을(를) 되돌립니다.\n\n` +
+      "복원 전에 현재 상태를 먼저 백업하므로 다시 되돌릴 수 있습니다. 세이브 파일도 그 시점으로 돌아갑니다." +
+      (isDirty() ? "\n저장하지 않은 로드 순서 변경은 사라집니다." : "") +
+      `\n\n${game.toUpperCase()}가 실행 중이면 먼저 종료하세요.`,
+    "복원",
+    true,
+  );
+  if (!ok) return;
+  try {
+    const safety = await invoke<string>("restore_backup", { game, profilePath, backupPath: chosen.path });
+    state.profiles = await invoke<Profile[]>("list_profiles", { game });
+    renderProfileSelect();
+    await loadProfile();
+    setStatus(`복원했습니다. 복원 직전 상태의 백업: ${safety}`, "ok");
+  } catch (e) {
+    setStatus(`복원 실패: ${errorText(e)}`, "error");
+  }
+}
+
+async function openSettings() {
+  let view: SettingsView;
+  try {
+    view = await invoke<SettingsView>("get_settings");
+  } catch (e) {
+    setStatus(errorText(e), "error");
+    return;
+  }
+  state.settings = view;
+  const s = view.settings;
+
+  const lookup = h("input", { type: "checkbox", id: "set-lookup", checked: s.workshop_lookup });
+  const keep = h("input", {
+    type: "number",
+    id: "set-keep",
+    min: "0",
+    max: "1000",
+    value: String(s.backup_keep),
+  });
+  const pathInput = (id: string, value: string | null, detected: string | null | undefined) =>
+    h("input", {
+      type: "text",
+      id,
+      value: value ?? "",
+      spellcheck: "false",
+      placeholder: detected ? `자동 감지: ${detected}` : "자동 감지 실패 — 경로를 직접 입력하세요",
+    });
+  const inputs = {
+    ets2: {
+      documents: pathInput("set-ets2-docs", s.ets2.documents_dir, view.detected.ets2?.documents_dir),
+      workshop: pathInput("set-ets2-ws", s.ets2.workshop_dir, view.detected.ets2?.workshop_dir),
+    },
+    ats: {
+      documents: pathInput("set-ats-docs", s.ats.documents_dir, view.detected.ats?.documents_dir),
+      workshop: pathInput("set-ats-ws", s.ats.workshop_dir, view.detected.ats?.workshop_dir),
+    },
+  };
+  const names = h("textarea", { id: "set-mapbase", rows: "5", spellcheck: "false" });
+  names.value = s.map_base_names.join("\n");
+  const error = h("div", { class: "form-error", role: "alert" });
+  const field = (label: string, control: HTMLElement, note?: string) =>
+    h(
+      "label",
+      { class: "form-row" },
+      h("span", { class: "form-label" }, label),
+      control,
+      note ? h("span", { class: "form-note" }, note) : null,
+    );
+  const pathFields = (title: string, group: { documents: HTMLElement; workshop: HTMLElement }) => [
+    h("h3", {}, title),
+    field("문서 폴더", group.documents, "mod, profiles 폴더가 들어 있는 곳입니다. 비워 두면 자동 감지합니다."),
+    field("창작마당 폴더", group.workshop, "steamapps/workshop/content/<앱 ID> 폴더입니다. 비워 두면 자동 감지합니다."),
+  ];
+  const body = h(
+    "div",
+    { class: "form" },
+    h(
+      "label",
+      { class: "form-check" },
+      lookup,
+      h("span", {}, "창작마당 모드의 이름과 미리보기를 Steam에서 가져오기"),
+    ),
+    h("div", { class: "form-note" }, "스캔 후 캐시에 없는 창작마당 ID만 Steam 공개 API로 보냅니다."),
+    field("프로필당 백업 보관 개수", keep, `0이면 모두 보관합니다. 백업 위치: ${view.backup_root}`),
+    ...pathFields("ETS2 경로", inputs.ets2),
+    ...pathFields("ATS 경로", inputs.ats),
+    h("h3", {}, "로드 순서 맨 위에 두는 모드"),
+    field(
+      "이름 조각 (한 줄에 하나)",
+      names,
+      "모드 이름에 이 글자가 들어 있으면 '맵 기반 · 배경 · 로딩 화면' 그룹으로 분류합니다.",
+    ),
+    error,
+  );
+
+  const text = (el: HTMLInputElement) => el.value.trim() || null;
+  const saved = await openDialog<boolean>({
+    title: "설정",
+    body,
+    wide: true,
+    dismiss: false,
+    buttons: [
+      { label: "취소", value: false },
+      { label: "저장", value: true, kind: "primary" },
+    ],
+    beforeClose: async (value) => {
+      if (!value) return;
+      const count = Number(keep.value);
+      if (!Number.isInteger(count) || count < 0 || count > 1000) {
+        error.textContent = "백업 보관 개수는 0에서 1000 사이의 정수여야 합니다.";
+        return false;
+      }
+      const next: Settings = {
+        ...s,
+        workshop_lookup: lookup.checked,
+        backup_keep: count,
+        map_base_names: names.value.split("\n"),
+        ets2: { ...s.ets2, documents_dir: text(inputs.ets2.documents), workshop_dir: text(inputs.ets2.workshop) },
+        ats: { ...s.ats, documents_dir: text(inputs.ats.documents), workshop_dir: text(inputs.ats.workshop) },
+      };
+      try {
+        await invoke("save_settings", { settings: next });
+      } catch (e) {
+        error.textContent = errorText(e);
+        return false;
+      }
+    },
+  });
+  if (!saved) return;
+
+  try {
+    [state.settings, state.installs] = await Promise.all([
+      invoke<SettingsView>("get_settings"),
+      invoke<InstallInfo[]>("get_installs"),
+    ]);
+  } catch (e) {
+    setStatus(errorText(e), "error");
+    return;
+  }
+  if (isDirty()) {
+    renderGameSwitch();
+    setStatus("설정을 저장했습니다. 저장하지 않은 로드 순서가 있어 다시 스캔하지 않았습니다. '다시 스캔'을 누르면 반영됩니다.", "ok");
+    return;
+  }
+  const target = state.installs.find((i) => i.game === state.game) ?? state.installs[0];
+  if (!target) {
+    renderGameSwitch();
+    setStatus("설정을 저장했습니다. ETS2 / ATS 데이터 폴더를 찾지 못했습니다.", "error");
+    return;
+  }
+  icons.clear();
+  await loadGame(target.game);
+}
+
 // ----------------------------------------------------------------- boot
 
 function bindControls() {
@@ -916,6 +1271,12 @@ function bindControls() {
   bindSelect("filter-category", "category");
   bindSelect("filter-source", "source");
   bindSelect("sort", "sort");
+  $<HTMLInputElement>("filter-favorites").addEventListener("change", (ev) => {
+    filter.favorites = (ev.target as HTMLInputElement).checked;
+    renderLibrary();
+  });
+  $("open-settings").addEventListener("click", () => void openSettings());
+  $("open-backups").addEventListener("click", () => void openBackups());
 
   $<HTMLSelectElement>("profile-select").addEventListener("change", async (ev) => {
     const select = ev.target as HTMLSelectElement;
@@ -926,6 +1287,7 @@ function bindControls() {
     state.profilePath = select.value;
     try {
       await loadProfile();
+      rememberPlace();
     } catch (e) {
       setStatus(errorText(e), "error");
     }
@@ -946,9 +1308,10 @@ async function boot() {
   bindControls();
   setupReordering();
   try {
-    [state.constants, state.installs] = await Promise.all([
+    [state.constants, state.installs, state.settings] = await Promise.all([
       invoke<Constants>("constants"),
       invoke<InstallInfo[]>("get_installs"),
+      invoke<SettingsView>("get_settings"),
     ]);
   } catch (e) {
     setStatus(errorText(e), "error");
@@ -961,10 +1324,15 @@ async function boot() {
   if (state.installs.length === 0) {
     renderGameSwitch();
     renderAll();
-    setStatus("ETS2 / ATS 데이터 폴더를 찾지 못했습니다.", "error");
+    setStatus("ETS2 / ATS 데이터 폴더를 찾지 못했습니다. 설정에서 경로를 직접 지정할 수 있습니다.", "error");
     return;
   }
-  const first = state.installs.find((i) => i.game === "ets2") ?? state.installs[0];
+  // start where the user left off, else ETS2, else whatever exists
+  const lastGame = state.settings.settings.last_game;
+  const first =
+    state.installs.find((i) => i.game === lastGame) ??
+    state.installs.find((i) => i.game === "ets2") ??
+    state.installs[0];
   await loadGame(first.game);
 }
 
