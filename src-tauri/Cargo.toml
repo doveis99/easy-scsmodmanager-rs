@@ -19,3 +19,4 @@ serde_json = "1"
 base64 = "0.22"
 scsmm-core = { path = "../crates/scsmm-core", features = ["net"] }
 trash = "5.3.0"
+tauri-plugin-dialog = "2"

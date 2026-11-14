@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open as pickOpen, save as pickSave } from "@tauri-apps/plugin-dialog";
 import { $, confirmModal, dismissDialog, h, infoModal, openDialog } from "./dom";
 
 // ---------------------------------------------------------------- types
@@ -1255,6 +1256,230 @@ async function openSettings() {
   await loadGame(target.game);
 }
 
+// -------------------------------------------------------------- sharing
+
+type ShareStatus = "found" | "missing_workshop" | "missing_local";
+
+interface ShareCheck {
+  name: string;
+  display_name: string;
+  status: ShareStatus;
+  workshop_url: string | null;
+  share_version: string;
+  local_version: string | null;
+  outdated: boolean;
+}
+
+interface SharePreview {
+  kind: "modshare" | "profile";
+  profile_name: string;
+  entries: ShareCheck[];
+}
+
+interface MapComboPreview {
+  count: number;
+  missing: string[];
+  outdated: { name: string; local: string; combo: string }[];
+  order: string[];
+}
+
+const JSON_FILTER = [{ name: "JSON", extensions: ["json"] }];
+
+function currentProfileName(): string {
+  return state.profiles.find((p) => p.path === state.profilePath)?.profile_name ?? "";
+}
+
+/** File name safe on every platform, from a profile name. */
+function fileStem(name: string): string {
+  return name.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").trim() || "load-order";
+}
+
+async function exportShareTo(path: string) {
+  try {
+    const count = await invoke<number>("export_share", {
+      game: state.game,
+      profileName: currentProfileName(),
+      items: activeEntries(),
+      path,
+    });
+    setStatus(`로드 순서 ${count}개를 내보냈습니다: ${path}`, "ok");
+  } catch (e) {
+    setStatus(`내보내기 실패: ${errorText(e)}`, "error");
+  }
+}
+
+/** Preview a share file (or a profile.sii) and, on the user's go-ahead,
+ *  replace the edited list with it. Nothing is written until Save. */
+async function importShareFrom(path: string) {
+  let preview: SharePreview;
+  try {
+    preview = await invoke<SharePreview>("preview_share", { game: state.game, path });
+  } catch (e) {
+    setStatus(`가져오기 실패: ${errorText(e)}`, "error");
+    return;
+  }
+  const missing = preview.entries.filter((e) => e.status !== "found");
+  const outdated = preview.entries.filter((e) => e.outdated);
+  const rows = preview.entries.map((e) =>
+    h(
+      "div",
+      { class: "share-row" + (e.status === "found" ? "" : " missing") },
+      h("span", { class: "row-name" }, e.display_name || e.name),
+      e.outdated
+        ? h("span", { class: "badge warn", title: `설치된 버전 ${e.local_version} · 공유 목록 ${e.share_version}` }, "구버전")
+        : null,
+      e.status === "missing_local" ? h("span", { class: "badge err" }, "미설치 · 로컬") : null,
+      e.status === "missing_workshop"
+        ? h(
+            "button",
+            {
+              class: "btn small",
+              title: "Steam 창작마당 페이지 열기",
+              onclick: () => {
+                const id = e.workshop_url?.split("id=")[1] ?? "";
+                invoke("open_workshop_item", { workshopId: id }).catch((err) => setStatus(errorText(err), "error"));
+              },
+            },
+            "미설치 · 창작마당 열기",
+          )
+        : null,
+    ),
+  );
+  const source =
+    preview.kind === "profile"
+      ? `프로필 파일${preview.profile_name ? ` '${preview.profile_name}'` : ""}`
+      : `공유 파일${preview.profile_name ? ` (프로필 '${preview.profile_name}')` : ""}`;
+  const summary =
+    `${source}: 모드 ${preview.entries.length}개 · 설치됨 ${preview.entries.length - missing.length}개` +
+    (missing.length ? ` · 미설치 ${missing.length}개` : "") +
+    (outdated.length ? ` · 구버전 ${outdated.length}개` : "");
+  const body = h(
+    "div",
+    { class: "form" },
+    h("div", {}, summary),
+    h(
+      "div",
+      { class: "form-note" },
+      "가져오면 지금 편집 중인 로드 순서가 이 목록으로 바뀝니다. 프로필 파일은 '저장'을 눌러야 바뀝니다.",
+    ),
+    h("div", { class: "share-list" }, ...rows),
+  );
+  type Choice = "cancel" | "installed" | "all";
+  const buttons: { label: string; value: Choice; kind?: "primary" }[] = [{ label: "취소", value: "cancel" }];
+  if (missing.length) {
+    buttons.push({ label: "설치된 모드만 가져오기", value: "installed", kind: "primary" });
+    buttons.push({ label: "미설치 포함 전부", value: "all" });
+  } else {
+    buttons.push({ label: "가져오기", value: "all", kind: "primary" });
+  }
+  const choice = await openDialog<Choice>({ title: "로드 순서 가져오기", body, wide: true, dismiss: "cancel", buttons });
+  if (choice === "cancel") return;
+
+  const picked = preview.entries.filter((e) => choice === "all" || e.status === "found");
+  try {
+    state.active = await invoke<ActiveItem[]>("resolve_items", {
+      game: state.game,
+      items: picked.map(({ name, display_name }) => ({ name, display_name })),
+    });
+    await relayout();
+    setStatus(`모드 ${picked.length}개를 가져왔습니다. '저장'을 눌러야 게임에 반영됩니다.`, "ok");
+  } catch (e) {
+    setStatus(`가져오기 실패: ${errorText(e)}`, "error");
+  }
+}
+
+async function exportMapComboTo(path: string) {
+  try {
+    const count = await invoke<number>("export_map_combo", { game: state.game, items: activeEntries(), path });
+    setStatus(`맵 ${count}개의 순서를 내보냈습니다: ${path}`, "ok");
+  } catch (e) {
+    setStatus(`내보내기 실패: ${errorText(e)}`, "error");
+  }
+}
+
+async function importMapComboFrom(path: string) {
+  let preview: MapComboPreview;
+  try {
+    preview = await invoke<MapComboPreview>("preview_map_combo", { game: state.game, items: activeEntries(), path });
+  } catch (e) {
+    setStatus(`가져오기 실패: ${errorText(e)}`, "error");
+    return;
+  }
+  if (preview.missing.length) {
+    await infoModal(
+      "맵 콤보를 적용할 수 없습니다",
+      "이 콤보에 있는 다음 맵이 현재 로드 순서의 맵 그룹에 없습니다. 먼저 설치하고 활성화한 뒤 다시 가져오세요.\n\n" +
+        preview.missing.map((n) => `- ${n}`).join("\n"),
+    );
+    return;
+  }
+  const byName = new Map(state.active.map((a) => [a.name, a]));
+  state.active = preview.order.flatMap((n) => byName.get(n) ?? []);
+  await relayout();
+  setStatus(`맵 ${preview.count}개를 콤보 순서로 정렬했습니다. '저장'을 눌러야 게임에 반영됩니다.`, "ok");
+  if (preview.outdated.length) {
+    await infoModal(
+      "콤보보다 오래된 맵",
+      "순서는 적용했습니다. 다음 맵은 콤보를 만든 사람보다 낮은 버전이 설치돼 있습니다.\n\n" +
+        preview.outdated.map((o) => `- ${o.name}: 설치됨 ${o.local}, 콤보 ${o.combo}`).join("\n"),
+    );
+  }
+}
+
+type ShareAction = "close" | "export" | "import" | "combo-export" | "combo-import";
+
+async function openShareMenu() {
+  const body = h(
+    "div",
+    { class: "form" },
+    h("div", {}, "로드 순서를 파일로 주고받습니다. 공유 파일에는 모드 이름과 버전만 들어 있고, 모드 파일 자체는 들어 있지 않습니다."),
+    h(
+      "div",
+      { class: "form-note" },
+      "전체 가져오기는 공유 파일(.modshare.json)과 다른 사람의 profile.sii를 모두 읽습니다. 맵 콤보는 맵 그룹의 순서만 다룹니다.",
+    ),
+  );
+  const action = await openDialog<ShareAction>({
+    title: "공유",
+    body,
+    wide: true,
+    dismiss: "close",
+    buttons: [
+      { label: "닫기", value: "close" },
+      { label: "전체 내보내기", value: "export", kind: "primary" },
+      { label: "전체 가져오기", value: "import" },
+      { label: "맵 콤보 내보내기", value: "combo-export" },
+      { label: "맵 콤보 가져오기", value: "combo-import" },
+    ],
+  });
+  try {
+    if (action === "export") {
+      const path = await pickSave({ defaultPath: `${fileStem(currentProfileName())}.modshare.json`, filters: JSON_FILTER });
+      if (path) await exportShareTo(path);
+    } else if (action === "import") {
+      const path = await pickOpen({
+        multiple: false,
+        filters: [{ name: "공유 파일 또는 프로필", extensions: ["json", "sii"] }],
+      });
+      if (typeof path === "string") await importShareFrom(path);
+    } else if (action === "combo-export") {
+      const path = await pickSave({ defaultPath: `${fileStem(currentProfileName())}.mapcombo.json`, filters: JSON_FILTER });
+      if (path) await exportMapComboTo(path);
+    } else if (action === "combo-import") {
+      const path = await pickOpen({ multiple: false, filters: JSON_FILTER });
+      if (typeof path === "string") await importMapComboFrom(path);
+    }
+  } catch (e) {
+    setStatus(errorText(e), "error");
+  }
+}
+
+// The same entry points without the native file picker, so automated UI
+// checks can drive the flows with a path of their own.
+Object.assign(window, {
+  __scsmm: { exportShareTo, importShareFrom, exportMapComboTo, importMapComboFrom },
+});
+
 // ----------------------------------------------------------------- boot
 
 function bindControls() {
@@ -1277,6 +1502,7 @@ function bindControls() {
   });
   $("open-settings").addEventListener("click", () => void openSettings());
   $("open-backups").addEventListener("click", () => void openBackups());
+  $("open-share").addEventListener("click", () => void openShareMenu());
 
   $<HTMLSelectElement>("profile-select").addEventListener("change", async (ev) => {
     const select = ev.target as HTMLSelectElement;

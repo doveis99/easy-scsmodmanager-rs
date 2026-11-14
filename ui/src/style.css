@@ -649,6 +649,33 @@ input[type="search"] {
   font-variant-numeric: tabular-nums;
 }
 
+.share-list {
+  max-height: 44vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.share-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.share-row:last-child {
+  border-bottom: 0;
+}
+
+.share-row.missing .row-name {
+  color: var(--muted);
+}
+
+.modal-actions {
+  flex-wrap: wrap;
+}
+
 .detail {
   color: var(--text);
 }

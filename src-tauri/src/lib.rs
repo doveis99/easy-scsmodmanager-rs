@@ -23,6 +23,7 @@ use scsmm_core::manifest::sniff_image_mime;
 use scsmm_core::profile::{self, ActiveMod};
 use scsmm_core::scanner::{self, ScannedMod};
 use scsmm_core::settings::{default_settings_path, Settings};
+use scsmm_core::share::{self, check_share, MapComboEntry, ShareCheck, ShareList};
 use scsmm_core::steam;
 use scsmm_core::workshop_api::{self, WorkshopCache};
 
@@ -785,16 +786,21 @@ fn reveal_mod(game: String, id: String, state: State<'_, AppState>) -> CmdResult
 fn open_workshop_page(game: String, id: String, state: State<'_, AppState>) -> CmdResult<()> {
     let (_, workshop_id) = scanned_path(&state, parse_game(&game)?, &id)?;
     // the URL is built here from a numeric id, never taken from the UI
-    let url = workshop_url(&workshop_id.ok_or("창작마당 모드가 아닙니다.")?);
+    open_url(&workshop_url(&workshop_id.ok_or("창작마당 모드가 아닙니다.")?))
+}
+
+/// Hand a URL to the default browser. Callers only pass workshop URLs
+/// built here from a validated numeric id.
+fn open_url(url: &str) -> CmdResult<()> {
     #[cfg(windows)]
     std::process::Command::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", &url])
+        .args(["url.dll,FileProtocolHandler", url])
         .spawn()
         .map_err(err)?;
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(&url).spawn().map_err(err)?;
+    std::process::Command::new("open").arg(url).spawn().map_err(err)?;
     #[cfg(all(unix, not(target_os = "macos")))]
-    std::process::Command::new("xdg-open").arg(&url).spawn().map_err(err)?;
+    std::process::Command::new("xdg-open").arg(url).spawn().map_err(err)?;
     Ok(())
 }
 
@@ -953,8 +959,224 @@ fn delete_backup(
     profile::delete_backup(&sii, &backup_root(game), Path::new(&backup_path)).map_err(err)
 }
 
+// ------------------------------------------------------------------- //
+// commands: sharing
+// ------------------------------------------------------------------- //
+
+/// A share file is a few kilobytes; anything far beyond that is not one.
+const MAX_SHARE_FILE_BYTES: u64 = 5 * 1024 * 1024;
+
+#[derive(Serialize)]
+struct SharePreview {
+    /// `modshare` for a share file, `profile` for someone's profile.sii.
+    kind: &'static str,
+    profile_name: String,
+    /// Display order: top of the load order first.
+    entries: Vec<ShareCheck>,
+}
+
+#[derive(Serialize)]
+struct OutdatedMap {
+    name: String,
+    local: String,
+    combo: String,
+}
+
+#[derive(Serialize)]
+struct MapComboPreview {
+    /// Maps named in the combo.
+    count: usize,
+    /// Combo maps that are not in the Maps group of the current list.
+    missing: Vec<String>,
+    /// Maps installed in an older version than the combo was built with.
+    outdated: Vec<OutdatedMap>,
+    /// The whole list (display order) with the maps block rearranged.
+    order: Vec<String>,
+}
+
+/// Exports only ever write `.json` files into an existing folder; the path
+/// comes from the save dialog.
+fn write_share_file(path: &str, text: &str) -> CmdResult<()> {
+    let path = Path::new(path);
+    let is_json = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    if !is_json || !path.parent().is_some_and(|p| p.is_dir()) {
+        return Err("공유 파일은 기존 폴더 안의 .json 파일로만 저장할 수 있습니다.".into());
+    }
+    fs::write(path, text).map_err(err)
+}
+
+fn read_share_file(path: &Path) -> CmdResult<Vec<u8>> {
+    let size = fs::metadata(path).map_err(err)?.len();
+    if size > MAX_SHARE_FILE_BYTES {
+        return Err("파일이 너무 큽니다. 공유 파일이 아닌 것 같습니다.".into());
+    }
+    fs::read(path).map_err(err)
+}
+
+/// Installed version of an active entry: `None` when not installed, an
+/// empty string when installed with an unknown version.
+fn local_version(scanned: &[ScannedMod], matcher: &ActiveModMatcher, name: &str, display_name: &str) -> Option<String> {
+    let probe = ActiveMod {
+        name: name.to_string(),
+        display_name: display_name.to_string(),
+    };
+    let m = &scanned[matcher.lookup(&probe)?];
+    Some(m.manifest.as_ref().map(|mf| mf.package_version.clone()).unwrap_or_default())
+}
+
+/// Names (in `items`) of the mods that sit in the Maps group.
+fn maps_block(inner: &mut Inner, game: Game, items: &[ActiveMod]) -> Vec<String> {
+    let maps = load_order::group_index_for_token(scsmm_core::categories::MAP);
+    resolve(inner, game, items)
+        .into_iter()
+        .filter(|i| load_order::group_index_for_token(&i.token) == maps)
+        .map(|i| i.name)
+        .collect()
+}
+
+/// Write the list (display order) as a ModShare file. Returns the number
+/// of mods written.
+#[tauri::command(async)]
+fn export_share(
+    game: String,
+    profile_name: String,
+    items: Vec<ActiveMod>,
+    path: String,
+    state: State<'_, AppState>,
+) -> CmdResult<usize> {
+    let game = parse_game(&game)?;
+    let share = {
+        let inner = lock(&state)?;
+        let empty = Vec::new();
+        let scanned = inner.scans.get(&game).unwrap_or(&empty);
+        let matcher = ActiveModMatcher::new(scanned);
+        // the file is in profile order: index 0 = bottom of the load order
+        let profile = profile::Profile {
+            dir_name: String::new(),
+            profile_name,
+            active_mods: items.into_iter().rev().collect(),
+        };
+        ShareList::from_profile(&profile, game, |a| {
+            local_version(scanned, &matcher, &a.name, &a.display_name).filter(|v| !v.is_empty())
+        })
+    };
+    write_share_file(&path, &share.serialize())?;
+    Ok(share.entries.len())
+}
+
+/// Read a ModShare file - or someone's profile.sii - and check every mod
+/// in it against what is installed here. Nothing is changed.
+#[tauri::command(async)]
+fn preview_share(game: String, path: String, state: State<'_, AppState>) -> CmdResult<SharePreview> {
+    let game = parse_game(&game)?;
+    let path = Path::new(&path);
+    let is_profile = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("sii"));
+    let (kind, share) = if is_profile {
+        read_share_file(path)?; // size check only
+        let foreign = profile::read_profile(path).map_err(err)?;
+        ("profile", ShareList::from_profile(&foreign, game, |_| None))
+    } else {
+        let raw = read_share_file(path)?;
+        let share = ShareList::parse(&String::from_utf8_lossy(&raw)).map_err(err)?;
+        if share.game != game {
+            return Err(format!(
+                "이 공유 파일은 {}용입니다. {}로 전환한 뒤 가져오세요.",
+                share.game.short_name(),
+                share.game.short_name()
+            ));
+        }
+        ("modshare", share)
+    };
+
+    let inner = lock(&state)?;
+    let empty = Vec::new();
+    let scanned = inner.scans.get(&game).unwrap_or(&empty);
+    let matcher = ActiveModMatcher::new(scanned);
+    let mut entries = check_share(&share, |e| local_version(scanned, &matcher, &e.name, &e.display_name));
+    entries.reverse(); // display order
+    Ok(SharePreview {
+        kind,
+        profile_name: share.profile_name,
+        entries,
+    })
+}
+
+/// Write the Maps group of the list (display order) as a MapCombo file.
+#[tauri::command(async)]
+fn export_map_combo(game: String, items: Vec<ActiveMod>, path: String, state: State<'_, AppState>) -> CmdResult<usize> {
+    let game = parse_game(&game)?;
+    let combo: Vec<MapComboEntry> = {
+        let mut inner = lock(&state)?;
+        let block = maps_block(&mut inner, game, &items);
+        let empty = Vec::new();
+        let scanned = inner.scans.get(&game).unwrap_or(&empty);
+        let matcher = ActiveModMatcher::new(scanned);
+        items
+            .iter()
+            .filter(|a| block.contains(&a.name))
+            .map(|a| MapComboEntry {
+                name: a.name.clone(),
+                display_name: a.display_name.clone(),
+                package_version: local_version(scanned, &matcher, &a.name, &a.display_name).unwrap_or_default(),
+            })
+            .collect()
+    };
+    if combo.is_empty() {
+        return Err("로드 순서의 맵 그룹에 모드가 없습니다.".into());
+    }
+    write_share_file(&path, &share::serialize_map_combo(&combo))?;
+    Ok(combo.len())
+}
+
+/// Read a MapCombo file and work out the reordered list. Nothing is
+/// changed; the UI applies `order` only when no map is missing.
+#[tauri::command(async)]
+fn preview_map_combo(game: String, items: Vec<ActiveMod>, path: String, state: State<'_, AppState>) -> CmdResult<MapComboPreview> {
+    let game = parse_game(&game)?;
+    let raw = read_share_file(Path::new(&path))?;
+    let combo = share::parse_map_combo(&String::from_utf8_lossy(&raw)).map_err(err)?;
+
+    let mut inner = lock(&state)?;
+    let block: std::collections::HashSet<String> = maps_block(&mut inner, game, &items).into_iter().collect();
+    let empty = Vec::new();
+    let scanned = inner.scans.get(&game).unwrap_or(&empty);
+    let matcher = ActiveModMatcher::new(scanned);
+    let label = |e: &MapComboEntry| if e.display_name.is_empty() { e.name.clone() } else { e.display_name.clone() };
+
+    let missing = combo.iter().filter(|e| !block.contains(&e.name)).map(label).collect();
+    let outdated = combo
+        .iter()
+        .filter_map(|e| {
+            let local = local_version(scanned, &matcher, &e.name, &e.display_name).filter(|v| !v.is_empty())?;
+            (share::compare_versions(&local, &e.package_version) == Some(std::cmp::Ordering::Less)).then(|| OutdatedMap {
+                name: label(e),
+                local,
+                combo: e.package_version.clone(),
+            })
+        })
+        .collect();
+    let order: Vec<String> = items.iter().map(|a| a.name.clone()).collect();
+    Ok(MapComboPreview {
+        count: combo.len(),
+        missing,
+        outdated,
+        order: share::apply_map_combo(&order, &block, &combo),
+    })
+}
+
+/// Open a workshop item's Steam page by its numeric id (the subscribe
+/// link for a mod that a shared list needs but is not installed).
+#[tauri::command]
+fn open_workshop_item(workshop_id: String) -> CmdResult<()> {
+    if !workshop_api::is_workshop_id(&workshop_id) {
+        return Err("잘못된 창작마당 ID입니다.".into());
+    }
+    open_url(&workshop_url(&workshop_id))
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             constants,
@@ -982,6 +1204,11 @@ pub fn run() {
             list_backups,
             restore_backup,
             delete_backup,
+            export_share,
+            preview_share,
+            export_map_combo,
+            preview_map_combo,
+            open_workshop_item,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");
