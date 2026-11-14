@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
@@ -21,6 +22,7 @@ use crate::game::GameInstall;
 use crate::identity::{mod_name_for_path, workshop_id_for_path};
 use crate::manifest::{read_bundle, ManifestBundle, ModManifest, MANIFEST_ENTRY};
 use crate::scs::aem::AemSource;
+use crate::scs::cityhash::city_hash64;
 use crate::scs::dir::DirSource;
 use crate::scs::hashfs::HashFsReader;
 use crate::scs::zip::{is_zipfile, RawZipSource, ZipSource};
@@ -40,6 +42,13 @@ pub struct ScannedMod {
     /// the physics content signal (and later, conflict detection).
     #[serde(skip)]
     pub def_files: Vec<String>,
+    /// Fingerprint of every file the mod mounts: sorted, de-duplicated
+    /// hashes of the normalised paths, without the root-level files
+    /// (manifest, icon, readme) every mod has. Two mods that share a
+    /// fingerprint entry overwrite each other's file, so their relative
+    /// load order matters. Shared, because scans are cloned around.
+    #[serde(skip)]
+    pub file_hashes: Arc<[u64]>,
     /// When the payload landed on this filesystem (seconds since the Unix
     /// epoch; creation time where available). 0 when unreadable.
     pub installed_at: f64,
@@ -93,9 +102,26 @@ impl ScannedMod {
             description: None,
             is_map: false,
             def_files: Vec::new(),
+            file_hashes: Arc::from([]),
             installed_at: 0.0,
             icon: None,
         }
+    }
+
+    /// True when both mods carry a file at the same path - whichever sits
+    /// higher in the load order wins it.
+    pub fn overlaps(&self, other: &ScannedMod) -> bool {
+        // both sides are sorted: walk them together
+        let (a, b) = (&self.file_hashes, &other.file_hashes);
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            match a[i].cmp(&b[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => return true,
+            }
+        }
+        false
     }
 }
 
@@ -120,10 +146,51 @@ pub fn scan_mod_directory(directory: &Path, owned_dlc: Option<&BTreeSet<String>>
 }
 
 fn scan_paths(paths: &[PathBuf], owned_dlc: Option<&BTreeSet<String>>) -> Vec<ScannedMod> {
-    paths
+    let mut mods: Vec<ScannedMod> = paths
         .par_iter()
         .map(|p| scan_one(p, owned_dlc))
-        .collect()
+        .collect();
+    name_hidden_files(&mut mods);
+    mods
+}
+
+/// Paths probed in every archive regardless of what other mods list.
+const PROBED_DEFS: &[&str] = &["def/vehicle/physics.sii"];
+const PROBED_MAPS: &[&str] = &["map/europe.mbd", "map/usa.mbd"];
+
+/// Put names to files that archives carry without listing them.
+///
+/// A "locked" HashFS archive has its directory listings stripped: its
+/// files are there (and in the fingerprint, by hash) but nameless. A path
+/// that any other mod lists, or one of the few standard ones, can still be
+/// tested against the fingerprint - so the def files such an archive
+/// shares with the rest become visible to conflict detection, and a map or
+/// physics mod is recognised by content again.
+fn name_hidden_files(mods: &mut [ScannedMod]) {
+    let mut known: Vec<(u64, String)> = mods
+        .iter()
+        .flat_map(|m| m.def_files.iter())
+        .map(String::as_str)
+        .chain(PROBED_DEFS.iter().copied())
+        .map(|p| (city_hash64(p.as_bytes()), p.to_string()))
+        .collect();
+    known.sort_unstable();
+    known.dedup();
+    let map_hashes: Vec<u64> = PROBED_MAPS.iter().map(|p| city_hash64(p.as_bytes())).collect();
+
+    for m in mods.iter_mut() {
+        let carries = |hash: &u64| m.file_hashes.binary_search(hash).is_ok();
+        let listed: std::collections::HashSet<&str> = m.def_files.iter().map(String::as_str).collect();
+        let hidden: Vec<String> = known
+            .iter()
+            .filter(|(hash, path)| !listed.contains(path.as_str()) && carries(hash))
+            .map(|(_, path)| path.clone())
+            .collect();
+        if !m.is_map && map_hashes.iter().any(carries) {
+            m.is_map = true;
+        }
+        m.def_files.extend(hidden);
+    }
 }
 
 fn sorted_children(dir: &Path) -> Vec<PathBuf> {
@@ -212,8 +279,42 @@ fn strip_dlc_prefix<'a>(path: &'a str, owned_dlc: Option<&BTreeSet<String>>) -> 
     }
 }
 
-/// `is_map` flag plus the `def/` file paths from a single listing.
-fn map_and_defs(files: &[String], owned_dlc: Option<&BTreeSet<String>>) -> (bool, Vec<String>) {
+/// What one listing tells about a mod: the `is_map` flag, the `def/` file
+/// paths and the fingerprint of all its files.
+struct ListingFacts {
+    is_map: bool,
+    def_files: Vec<String>,
+    file_hashes: Arc<[u64]>,
+}
+
+/// Root-level files a mod may carry besides the ones its manifest names.
+/// They exist in every mod and say nothing about load order.
+const ROOT_FILE_NAMES: &[&str] = &[
+    "manifest.sii",
+    "version.sii",
+    "version.txt",
+    "description.txt",
+    "mod_description.txt",
+    "readme.txt",
+    "icon.jpg",
+    "icon.png",
+    "mod_icon.jpg",
+    "mod_icon.png",
+    "mod_workshop_icon.jpg",
+    "preview.jpg",
+    "preview.png",
+    "thumbnail.jpg",
+];
+
+/// `files` is the listing by name; `table_hashes` the container's own
+/// path hashes when it has them (complete even where the listing is not);
+/// `root_names` the root-level files the manifest points at.
+fn listing_facts(
+    files: &[String],
+    table_hashes: Option<Vec<u64>>,
+    root_names: &[&str],
+    owned_dlc: Option<&BTreeSet<String>>,
+) -> ListingFacts {
     // normalise the 1.48 package layers once, before both signals derive
     // from them; dedupe keeping first-seen order
     let mut seen = std::collections::HashSet::new();
@@ -229,7 +330,32 @@ fn map_and_defs(files: &[String], owned_dlc: Option<&BTreeSet<String>>) -> (bool
         .filter(|p| p.starts_with("def/") && !p.ends_with('/'))
         .map(|p| p.to_string())
         .collect();
-    (is_map, def_files)
+    // every mounted file below the root; root-level files (manifest.sii,
+    // icon, description) exist in every mod and never conflict meaningfully
+    let mut hashes: Vec<u64> = normalized
+        .iter()
+        .filter(|p| p.contains('/') && !p.ends_with('/'))
+        .map(|p| city_hash64(p.as_bytes()))
+        .collect();
+    if let Some(table) = table_hashes {
+        // the table also holds the root-level files; drop the ones we can
+        // name (standard names, the manifest's, and whatever is listed)
+        let root: std::collections::HashSet<u64> = ROOT_FILE_NAMES
+            .iter()
+            .chain(root_names)
+            .copied()
+            .chain(files.iter().map(|f| f.trim_start_matches('/')).filter(|f| !f.contains('/')))
+            .map(|name| city_hash64(name.as_bytes()))
+            .collect();
+        hashes.extend(table.into_iter().filter(|h| !root.contains(h)));
+    }
+    hashes.sort_unstable();
+    hashes.dedup();
+    ListingFacts {
+        is_map,
+        def_files,
+        file_hashes: Arc::from(hashes),
+    }
 }
 
 fn from_bundle(
@@ -239,15 +365,17 @@ fn from_bundle(
     source: &mut dyn ModSource,
     owned_dlc: Option<&BTreeSet<String>>,
 ) -> ScannedMod {
-    let (is_map, def_files) = map_and_defs(&source.list_files(), owned_dlc);
+    let root_names = [bundle.manifest.icon.as_str(), bundle.manifest.description_file.as_str()];
+    let facts = listing_facts(&source.list_files(), source.path_hashes(), &root_names, owned_dlc);
     ScannedMod {
         path: path.to_path_buf(),
         format,
         manifest: Some(bundle.manifest),
         error: None,
         description: bundle.description,
-        is_map,
-        def_files,
+        is_map: facts.is_map,
+        def_files: facts.def_files,
+        file_hashes: facts.file_hashes,
         installed_at: 0.0,
         icon: bundle.icon,
     }
@@ -398,9 +526,113 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let (is_map, defs) = map_and_defs(&files, None);
-        assert!(is_map);
-        assert_eq!(defs, vec!["def/a.sii"]);
+        let facts = listing_facts(&files, None, &[], None);
+        assert!(facts.is_map);
+        assert_eq!(facts.def_files, vec!["def/a.sii"]);
+        // def/a.sii (once, though listed twice), map/x.mbd and ui/b.mat
+        assert_eq!(facts.file_hashes.len(), 3);
+    }
+
+    /// A HashFS v1 archive without any directory listing - the way
+    /// "locked" mods ship: every file is addressable by hash only.
+    fn build_locked_v1(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"SCS#");
+        out.extend_from_slice(&1u16.to_le_bytes()); // version
+        out.extend_from_slice(&0u16.to_le_bytes()); // salt
+        out.extend_from_slice(b"CITY");
+        out.extend_from_slice(&(files.len() as u32).to_le_bytes());
+        let table_offset_pos = out.len();
+        out.extend_from_slice(&0u64.to_le_bytes());
+        let mut rows = Vec::new();
+        for (path, content) in files {
+            rows.push((city_hash64(path.as_bytes()), out.len() as u64, content.len() as u32));
+            out.extend_from_slice(content);
+        }
+        let table_offset = out.len() as u64;
+        out[table_offset_pos..table_offset_pos + 8].copy_from_slice(&table_offset.to_le_bytes());
+        for (hash, offset, size) in rows {
+            out.extend_from_slice(&hash.to_le_bytes());
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes()); // flags: plain file
+            out.extend_from_slice(&0u32.to_le_bytes()); // crc
+            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn locked_archives_are_seen_through_their_hash_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mod_dir = tmp.path().join("mod");
+        fs::create_dir_all(&mod_dir).unwrap();
+
+        // a locked physics pack: nothing in it can be listed by name
+        fs::write(
+            mod_dir.join("a_locked.scs"),
+            build_locked_v1(&[
+                ("manifest.sii", MANIFEST),
+                ("pic.jpg", JPEG),
+                ("def/vehicle/physics.sii", b"."),
+                ("def/vehicle/truck/x/chassis.sii", b"."),
+                ("sound/engine.bank", b"."),
+            ]),
+        )
+        .unwrap();
+        // an ordinary patch that overrides one of its def files
+        make_zip(
+            &mod_dir.join("b_patch.scs"),
+            &[("manifest.sii", MANIFEST), ("pic.jpg", JPEG), ("def/vehicle/truck/x/chassis.sii", b"patched")],
+        );
+        // an unrelated mod that only shares the root-level files
+        make_zip(&mod_dir.join("c_other.scs"), &[("manifest.sii", MANIFEST), ("pic.jpg", JPEG), ("ui/a.mat", b".")]);
+        // another locked archive with a sound file the first one also has
+        fs::write(
+            mod_dir.join("d_locked_sound.scs"),
+            build_locked_v1(&[("manifest.sii", MANIFEST), ("sound/engine.bank", b"."), ("map/europe.mbd", b".")]),
+        )
+        .unwrap();
+
+        let mods = scan_mod_directory(&mod_dir, None);
+        let (locked, patch, other, locked_sound) = (&mods[0], &mods[1], &mods[2], &mods[3]);
+        assert!(locked.error.is_none(), "{:?}", locked.error);
+        assert_eq!(locked.icon.as_deref(), Some(JPEG));
+
+        // overlap is seen although the locked archive lists nothing
+        assert!(locked.overlaps(patch) && patch.overlaps(locked));
+        // two locked archives are compared hash to hash
+        assert!(locked.overlaps(locked_sound));
+        // manifest and icon are in every table and must not count
+        assert!(!locked.overlaps(other) && !patch.overlaps(other) && !locked_sound.overlaps(other));
+
+        // hidden def files get their names back: the one the patch lists and
+        // the standard physics file
+        let mut defs = locked.def_files.clone();
+        defs.sort();
+        assert_eq!(defs, ["def/vehicle/physics.sii", "def/vehicle/truck/x/chassis.sii"]);
+        assert_eq!(locked.effective_categories(None), ["physics"]);
+        // a locked map is recognised by its standard descriptor
+        assert!(locked_sound.is_map && !locked.is_map);
+        // nothing was invented for the ordinary mods
+        assert_eq!(patch.def_files, ["def/vehicle/truck/x/chassis.sii"]);
+        assert!(other.def_files.is_empty());
+    }
+
+    #[test]
+    fn overlap_ignores_root_files_and_sees_any_shared_path() {
+        let mk = |files: &[&str]| {
+            let files: Vec<String> = files.iter().map(|s| s.to_string()).collect();
+            let mut m = ScannedMod::failed(Path::new("x.scs"), ScsFormat::Zip, "");
+            m.file_hashes = listing_facts(&files, None, &[], None).file_hashes;
+            m
+        };
+        let sound = mk(&["manifest.sii", "icon.jpg", "sound/truck/engine.bank"]);
+        let patch = mk(&["manifest.sii", "icon.jpg", "base/sound/truck/engine.bank", "def/x.sii"]);
+        let other = mk(&["manifest.sii", "icon.jpg", "material/ui/a.mat"]);
+        assert!(sound.overlaps(&patch) && patch.overlaps(&sound)); // through the base/ layer
+        assert!(!sound.overlaps(&other)); // manifest and icon do not count
+        assert!(!other.overlaps(&mk(&[])));
     }
 
     #[test]

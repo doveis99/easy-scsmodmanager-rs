@@ -27,6 +27,16 @@ pub trait ModSource {
     /// with a trailing `/`, as ZIP archives list them).
     fn list_files(&mut self) -> Vec<String>;
 
+    /// CityHash64 of the path of every file in the container, for sources
+    /// that address files by such a hash (HashFS). Unlike [`list_files`]
+    /// this is complete even when the archive has no directory listings to
+    /// name its files. `None` when the source has no comparable hashes.
+    ///
+    /// [`list_files`]: ModSource::list_files
+    fn path_hashes(&mut self) -> Option<Vec<u64>> {
+        None
+    }
+
     fn read_text(&mut self, path: &str) -> Result<String> {
         Ok(String::from_utf8_lossy(&self.read_bytes(path)?).into_owned())
     }

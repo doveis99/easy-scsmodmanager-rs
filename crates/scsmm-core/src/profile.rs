@@ -329,9 +329,30 @@ fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
 // backups
 // --------------------------------------------------------------------- //
 
+static DATA_DIR_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Keep all app data in `dir` instead of the per-user location - the
+/// portable GUI points this at a folder next to its executable. Takes
+/// effect once, before anything asks for the data dir; returns whether it
+/// was applied.
+pub fn set_data_dir(dir: PathBuf) -> bool {
+    DATA_DIR_OVERRIDE.set(dir).is_ok()
+}
+
+/// Whether [`set_data_dir`] is in effect.
+pub fn data_dir_is_overridden() -> bool {
+    DATA_DIR_OVERRIDE.get().is_some()
+}
+
+/// Where this app keeps its data: the override from [`set_data_dir`] when
+/// there is one, else [`system_data_dir`].
+pub fn default_data_dir() -> PathBuf {
+    DATA_DIR_OVERRIDE.get().cloned().unwrap_or_else(system_data_dir)
+}
+
 /// Per-user data directory of this app: `%APPDATA%` on Windows, otherwise
 /// `$XDG_DATA_HOME` or `~/.local/share`.
-pub fn default_data_dir() -> PathBuf {
+pub fn system_data_dir() -> PathBuf {
     let base = if cfg!(windows) {
         env::var_os("APPDATA").map(PathBuf::from)
     } else {

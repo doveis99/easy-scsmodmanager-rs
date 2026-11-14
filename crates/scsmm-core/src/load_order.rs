@@ -122,6 +122,53 @@ pub fn auto_sort_order<S: AsRef<str>>(tokens: &[S]) -> Vec<usize> {
     order
 }
 
+/// Sort mods into their groups without ever inverting a pair that must
+/// keep its order.
+///
+/// `keep_above` lists pairs `(upper, lower)` of indices into `tokens` -
+/// mods that overwrite each other's files, so whichever is higher wins.
+/// The current order of such a pair is the user's (working) decision: a
+/// patch sits above the mod it patches no matter what category either one
+/// declares. Sorting by group alone would flip those, so this is a
+/// topological sort instead: of all mods whose required predecessors are
+/// already placed, the one with the earliest group (then the earliest
+/// current position) goes next.
+///
+/// Without constraints the result equals [`auto_sort_order`]. With them, a
+/// mod held back by a predecessor simply follows it and stays flagged as
+/// outside its group - which is correct, and what the caller reports.
+/// Pairs that are not `upper < lower` are ignored, so the constraint graph
+/// is acyclic by construction.
+pub fn auto_sort_preserving<S: AsRef<str>>(tokens: &[S], keep_above: &[(usize, usize)]) -> Vec<usize> {
+    let n = tokens.len();
+    let groups: Vec<usize> = tokens.iter().map(|t| group_index_for_token(t.as_ref())).collect();
+    let mut blockers = vec![0usize; n];
+    let mut below: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(upper, lower) in keep_above {
+        if upper < lower && lower < n {
+            blockers[lower] += 1;
+            below[upper].push(lower);
+        }
+    }
+    let mut placed = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+    for _ in 0..n {
+        // n is a load order (tens of mods): a linear scan beats a heap here
+        let Some(next) = (0..n)
+            .filter(|&i| !placed[i] && blockers[i] == 0)
+            .min_by_key(|&i| (groups[i], i))
+        else {
+            break; // unreachable: every edge goes from a lower to a higher index
+        };
+        placed[next] = true;
+        order.push(next);
+        for &lower in &below[next] {
+            blockers[lower] -= 1;
+        }
+    }
+    order
+}
+
 /// Number of mods [`build_rows`] would flag as misplaced.
 pub fn misplaced_count<S: AsRef<str>>(tokens: &[S]) -> usize {
     build_rows(tokens)
@@ -177,6 +224,55 @@ mod tests {
     #[test]
     fn empty_list_is_all_spacers() {
         assert_eq!(build_rows::<&str>(&[]).len(), GROUPS.len());
+    }
+
+    #[test]
+    fn preserving_sort_equals_plain_sort_without_constraints() {
+        let tokens = ["truck", "sound", "map", "truck", "map_base", "sound"];
+        assert_eq!(auto_sort_preserving(&tokens, &[]), auto_sort_order(&tokens));
+        assert!(auto_sort_preserving::<&str>(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn preserving_sort_keeps_a_patch_above_what_it_patches() {
+        // a "truck" patch sits above the "other" mod it patches; by group
+        // alone the patched mod (ui_other) would jump above the patch
+        let tokens = ["truck", "other", "sound", "map"];
+        assert_eq!(auto_sort_order(&tokens), vec![2, 1, 0, 3]);
+        let order = auto_sort_preserving(&tokens, &[(0, 1)]);
+        assert_eq!(order, vec![2, 0, 1, 3]);
+        let pos = |i: usize| order.iter().position(|&x| x == i).unwrap();
+        assert!(pos(0) < pos(1));
+        // the held mod is still reported as outside its group
+        let sorted: Vec<&str> = order.iter().map(|&i| tokens[i]).collect();
+        assert_eq!(misplaced_count(&sorted), 1);
+    }
+
+    #[test]
+    fn preserving_sort_respects_every_constraint_and_is_a_permutation() {
+        let tokens = ["map", "truck", "sound", "other", "physics", "truck", "graphics", "sound", "map"];
+        let keep: Vec<(usize, usize)> = vec![(0, 2), (1, 3), (3, 4), (5, 7), (2, 7), (0, 8)];
+        let order = auto_sort_preserving(&tokens, &keep);
+        let mut seen = order.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..tokens.len()).collect::<Vec<_>>());
+        let pos = |i: usize| order.iter().position(|&x| x == i).unwrap();
+        for (upper, lower) in keep {
+            assert!(pos(upper) < pos(lower), "{upper} must stay above {lower}: {order:?}");
+        }
+        // sorting again changes nothing
+        let sorted: Vec<&str> = order.iter().map(|&i| tokens[i]).collect();
+        let again_keep: Vec<(usize, usize)> = [(0, 2), (1, 3), (3, 4), (5, 7), (2, 7), (0, 8)]
+            .iter()
+            .map(|&(u, l)| (pos(u), pos(l)))
+            .collect();
+        assert_eq!(auto_sort_preserving(&sorted, &again_keep), (0..tokens.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn preserving_sort_ignores_backward_and_out_of_range_pairs() {
+        let tokens = ["truck", "sound"];
+        assert_eq!(auto_sort_preserving(&tokens, &[(1, 0), (0, 9), (1, 1)]), vec![1, 0]);
     }
 
     #[test]

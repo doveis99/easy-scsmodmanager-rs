@@ -228,6 +228,18 @@ impl ModSource for HashFsReader {
     fn list_files(&mut self) -> Vec<String> {
         self.iter_files()
     }
+
+    fn path_hashes(&mut self) -> Option<Vec<u64>> {
+        // a salted archive hashes "<salt><path>": comparable with nothing
+        // outside itself
+        (self.salt == 0).then(|| {
+            self.entries
+                .iter()
+                .filter(|(_, e)| !e.is_directory)
+                .map(|(hash, _)| *hash)
+                .collect()
+        })
+    }
 }
 
 fn parse_listing_v1(blob: &[u8]) -> (Vec<String>, Vec<String>) {

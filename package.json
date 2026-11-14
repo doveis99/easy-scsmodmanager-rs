@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
-    "bundle": "tauri build"
+    "portable": "node scripts/portable.mjs",
+    "clean": "node scripts/clean.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",

@@ -122,6 +122,17 @@ interface WorkshopFetch {
   error: string | null;
 }
 
+interface SortPlan {
+  /** Permutation that sorts into groups without changing any file's winner. */
+  order: number[];
+  sorted: boolean;
+  /** Mods kept outside their group by a mod they share files with. */
+  held: string[];
+  partners: Record<string, string[]>;
+}
+
+const NO_PLAN: SortPlan = { order: [], sorted: true, held: [], partners: {} };
+
 interface Constants {
   categories: string[];
   groups: string[];
@@ -182,6 +193,7 @@ const state = {
   saved: "[]",
   layout: { rows: [], misplaced: 0 } as Layout,
   conflicts: { overrides: {}, frequent: {} } as ConflictReport,
+  plan: NO_PLAN,
   filter: { q: "", category: "", source: "", sort: "name", favorites: false },
   settings: null as SettingsView | null,
   /** Bumped per load so a slow response for an old game/profile is dropped. */
@@ -215,6 +227,7 @@ async function loadGame(game: GameId) {
   // the old layout indexes into the list that was just cleared
   state.layout = { rows: [], misplaced: 0 };
   state.conflicts = { overrides: {}, frequent: {} };
+  state.plan = NO_PLAN;
   renderGameSwitch();
   renderProfileSelect();
   renderAll();
@@ -313,13 +326,15 @@ function activeEntries(items: ActiveItem[] = state.active) {
 /** Recompute group headers and conflicts for the current list and redraw. */
 async function relayout() {
   const epoch = state.epoch;
-  const [layout, conflicts] = await Promise.all([
+  const [layout, conflicts, plan] = await Promise.all([
     invoke<Layout>("layout_rows", { tokens: state.active.map((a) => a.token) }),
     invoke<ConflictReport>("analyze_conflicts", { game: state.game, items: activeEntries() }),
+    invoke<SortPlan>("sort_plan", { game: state.game, items: activeEntries() }),
   ]);
   if (epoch !== state.epoch) return;
   state.layout = layout;
   state.conflicts = conflicts;
+  state.plan = plan;
   renderAll();
 }
 
@@ -620,7 +635,12 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
 
 function renderOrder() {
   const rowsEl = $("rows");
-  const { rows, misplaced } = state.layout;
+  const { rows } = state.layout;
+  // a mod outside its group is only a problem when nothing holds it there
+  const held = new Set(state.plan.held);
+  const outside = rows.flatMap((r) => (r.kind === "mod" && r.misplaced ? [state.active[r.index]?.name] : []));
+  const heldCount = outside.filter((n) => n !== undefined && held.has(n)).length;
+  const misplaced = outside.length - heldCount;
   const dirty = isDirty();
 
   const overridden = Object.keys(state.conflicts.overrides).length;
@@ -628,11 +648,12 @@ function renderOrder() {
   $("order-summary").textContent =
     `활성 ${state.active.length}개` +
     (misplaced ? ` · 그룹에 맞지 않는 모드 ${misplaced}개` : "") +
+    (heldCount ? ` · 순서 유지 ${heldCount}개` : "") +
     (overridden ? ` · 덮어써지는 모드 ${overridden}개` : "") +
     (incompatible ? ` · 버전 불일치 ${incompatible}개` : "");
   $("show-conflicts").hidden =
     overridden === 0 && Object.keys(state.conflicts.frequent).length === 0;
-  $<HTMLButtonElement>("auto-sort").disabled = misplaced === 0;
+  $<HTMLButtonElement>("auto-sort").disabled = state.plan.sorted;
   $<HTMLButtonElement>("revert").disabled = !dirty;
   $<HTMLButtonElement>("save").disabled = !dirty || !state.profilePath;
 
@@ -677,15 +698,16 @@ function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLEle
   return h(
     "div",
     {
-      class: "row mod" + (row.misplaced ? " misplaced" : "") + (item.installed ? "" : " missing"),
+      class:
+        "row mod" +
+        (row.misplaced && !state.plan.held.includes(item.name) ? " misplaced" : "") +
+        (item.installed ? "" : " missing"),
       tabindex: "0",
       "data-index": String(row.index),
     },
     h("span", { class: "grip", "aria-hidden": "true" }, "⋮⋮"),
     h("span", { class: "row-name" }, item.display_name || item.name),
-    row.misplaced
-      ? h("span", { class: "badge warn" }, `→ ${groupLabel(row.expected_group_id)}`)
-      : null,
+    row.misplaced ? placementBadge(row, item) : null,
     item.installed ? null : h("span", { class: "badge err" }, "미설치"),
     item.compat === "incompatible"
       ? h(
@@ -735,13 +757,40 @@ async function moveActive(from: number, insertAt: number) {
   await relayout();
 }
 
+/** Badge for a mod that sits outside its group: a warning when it could
+ *  simply move there, a neutral note when a mod it shares files with holds
+ *  it where it is (a patch above what it patches). */
+function placementBadge(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLElement {
+  const group = groupLabel(row.expected_group_id);
+  if (!state.plan.held.includes(item.name)) {
+    return h("span", { class: "badge warn", title: `분류상 '${group}' 그룹에 속합니다.` }, `→ ${group}`);
+  }
+  const partners = (state.plan.partners[item.name] ?? []).map(displayNameOf);
+  const shown = partners.slice(0, 6).join(", ") + (partners.length > 6 ? ` 외 ${partners.length - 6}개` : "");
+  return h(
+    "span",
+    {
+      class: "badge keep",
+      title:
+        `분류상 '${group}' 그룹이지만 이 위치가 맞습니다.\n` +
+        `같은 파일을 가진 모드와의 위아래 순서를 지켜야 해서 옮기지 않습니다: ${shown}`,
+    },
+    "순서 유지",
+  );
+}
+
+/** Sort mods into their groups. Mods that share files keep their relative
+ *  order, so the sort never changes which mod wins a file. */
 async function autoSort() {
-  const order = await invoke<number[]>("auto_sort", {
-    tokens: state.active.map((a) => a.token),
-  });
+  const { order, held } = state.plan;
+  if (order.length !== state.active.length) return; // plan is for another list
   state.active = order.map((i) => state.active[i]);
   await relayout();
-  setStatus("모든 모드를 각자의 그룹으로 정렬했습니다. 그룹 안의 순서는 그대로입니다. 저장해야 게임에 반영됩니다.");
+  setStatus(
+    "모드를 그룹별로 정렬했습니다. 같은 파일을 가진 모드끼리는 위아래 순서를 그대로 두어 우선순위가 바뀌지 않습니다." +
+      (held.length ? ` 그 때문에 ${held.length}개는 그룹 밖에 그대로 있습니다.` : "") +
+      " 저장해야 게임에 반영됩니다.",
+  );
 }
 
 async function revert() {

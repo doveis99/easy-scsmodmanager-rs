@@ -75,10 +75,76 @@ fn backup_root(game: Game) -> PathBuf {
 
 /// Cache, not data: everything in here can be fetched again.
 fn workshop_cache_dir() -> PathBuf {
+    if profile::data_dir_is_overridden() {
+        return profile::default_data_dir().join("cache").join("workshop");
+    }
+    system_workshop_cache_dir()
+}
+
+fn system_workshop_cache_dir() -> PathBuf {
     match std::env::var_os("LOCALAPPDATA") {
         Some(local) if cfg!(windows) => PathBuf::from(local).join("easy-scsmodmanager-rs").join("workshop"),
-        _ => profile::default_data_dir().join("cache").join("workshop"),
+        _ => profile::system_data_dir().join("cache").join("workshop"),
     }
+}
+
+/// The `data` folder next to the executable, if it can be written to.
+///
+/// The app is portable: settings, category pins, favourites, profile
+/// backups, the workshop cache and the webview's own files all live there,
+/// so the whole folder can be moved or put on a stick. A read-only
+/// location (Program Files, a CD) falls back to the per-user folders.
+fn portable_data_dir() -> Option<(PathBuf, bool)> {
+    let dir = std::env::current_exe().ok()?.parent()?.join("data");
+    let created = !dir.exists();
+    fs::create_dir_all(&dir).ok()?;
+    let probe = dir.join(".write-test");
+    fs::write(&probe, b"").ok()?;
+    let _ = fs::remove_file(&probe);
+    Some((dir, created))
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else if !target.exists() {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// First start of a fresh portable folder: bring along what an earlier,
+/// non-portable build kept in the per-user folders (settings, pins,
+/// favourites, profile backups, workshop cache). Copies only - the old
+/// folders are left as they are - and never overwrites.
+fn adopt_system_data(data: &Path) {
+    let old_data = profile::system_data_dir();
+    if old_data.is_dir() {
+        let _ = copy_dir(&old_data, data);
+    }
+    let old_cache = system_workshop_cache_dir();
+    if old_cache.is_dir() {
+        let _ = copy_dir(&old_cache, &data.join("cache").join("workshop"));
+    }
+}
+
+/// Switch to portable storage. Must run before the first data access and
+/// before the webview is created.
+fn enter_portable_mode() {
+    let Some((data, created)) = portable_data_dir() else {
+        return;
+    };
+    if created {
+        adopt_system_data(&data);
+    }
+    // WebView2 keeps its profile (cache, local storage) where this points
+    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", data.join("webview"));
+    profile::set_data_dir(data);
 }
 
 fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
@@ -507,11 +573,16 @@ fn remember_place(game: String, profile_path: Option<String>, state: State<'_, A
 // commands: mods
 // ------------------------------------------------------------------- //
 
-/// Scan the game's mod folder and workshop tree. Runs off the UI thread.
-#[tauri::command(async)]
-fn scan_mods(game: String, state: State<'_, AppState>) -> CmdResult<Vec<ModDto>> {
-    let game = parse_game(&game)?;
-    let (install, libs) = install_for(game, &settings_snapshot(&state)?)?;
+/// Everything one scan produces, before it is stored in the app state.
+struct ScanOutcome {
+    mods: Vec<ScannedMod>,
+    version: Option<String>,
+    profile_names: HashMap<String, String>,
+}
+
+/// Scan the game's mod folder and workshop tree.
+fn scan_game(game: Game, settings: &Settings) -> CmdResult<ScanOutcome> {
+    let (install, libs) = install_for(game, settings)?;
     let version = game::read_game_version(&install.documents_dir);
     let install_dir = game::find_game_install_dir(game, &libs);
     let owned = game::owned_dlc_tokens(install_dir.as_deref());
@@ -530,10 +601,54 @@ fn scan_mods(game: String, state: State<'_, AppState>) -> CmdResult<Vec<ModDto>>
         }
     }
 
+    Ok(ScanOutcome {
+        mods,
+        version,
+        profile_names,
+    })
+}
+
+type Prewarm = (Game, Settings, std::thread::JoinHandle<CmdResult<ScanOutcome>>);
+
+/// The scan started at launch. The webview needs a few hundred ms to come
+/// up; scanning during that time means the first screen has its mods the
+/// moment it asks for them.
+static PREWARM: Mutex<Option<Prewarm>> = Mutex::new(None);
+
+fn start_prewarm() {
+    let settings = Settings::load(&default_settings_path());
+    // the game the UI opens first: where the user left off, else ETS2
+    let game = settings.last_game.unwrap_or(Game::Ets2);
+    let for_scan = settings.clone();
+    let handle = std::thread::spawn(move || scan_game(game, &for_scan));
+    if let Ok(mut slot) = PREWARM.lock() {
+        *slot = Some((game, settings, handle));
+    }
+}
+
+/// The launch scan, if it was for this game under these settings. It is
+/// handed out once; every later scan is a fresh one.
+fn take_prewarm(game: Game, settings: &Settings) -> Option<CmdResult<ScanOutcome>> {
+    let (prewarmed_game, prewarmed_settings, handle) = PREWARM.lock().ok()?.take()?;
+    if prewarmed_game != game || prewarmed_settings != *settings {
+        return None;
+    }
+    handle.join().ok()
+}
+
+/// Scan the game's mods and return them. Runs off the UI thread.
+#[tauri::command(async)]
+fn scan_mods(game: String, state: State<'_, AppState>) -> CmdResult<Vec<ModDto>> {
+    let game = parse_game(&game)?;
+    let settings = settings_snapshot(&state)?;
+    let outcome = match take_prewarm(game, &settings) {
+        Some(prewarmed) => prewarmed?,
+        None => scan_game(game, &settings)?,
+    };
     let mut inner = lock(&state)?;
-    inner.scans.insert(game, mods);
-    inner.versions.insert(game, version);
-    inner.profile_names.insert(game, profile_names);
+    inner.scans.insert(game, outcome.mods);
+    inner.versions.insert(game, outcome.version);
+    inner.profile_names.insert(game, outcome.profile_names);
     Ok(build_dtos(&mut inner, game))
 }
 
@@ -882,10 +997,73 @@ fn layout_rows(tokens: Vec<String>) -> Layout {
     }
 }
 
-/// Permutation that sorts every mod into its group (stable).
+#[derive(Serialize)]
+struct SortPlan {
+    /// Permutation of the list (display order) that sorts mods into their
+    /// groups without changing which mod wins any file.
+    order: Vec<usize>,
+    /// The list is already in that order.
+    sorted: bool,
+    /// Mods that stay outside their group in the sorted list because a mod
+    /// they share files with has to stay above (or below) them.
+    held: Vec<String>,
+    /// For each held mod, the mods it shares files with.
+    partners: HashMap<String, Vec<String>>,
+}
+
+/// Work out the automatic sort for the list (display order, top first).
+///
+/// Two active mods that carry a file at the same path keep their current
+/// order: the upper one wins that file today, and a sort by category alone
+/// would silently hand it to the other (a patch declared as "truck" above
+/// a fix declared as "other" is the typical case).
 #[tauri::command]
-fn auto_sort(tokens: Vec<String>) -> Vec<usize> {
-    load_order::auto_sort_order(&tokens)
+fn sort_plan(game: String, items: Vec<ActiveMod>, state: State<'_, AppState>) -> CmdResult<SortPlan> {
+    let game = parse_game(&game)?;
+    let mut inner = lock(&state)?;
+    let tokens: Vec<String> = resolve(&mut inner, game, &items).into_iter().map(|i| i.token).collect();
+
+    let empty = Vec::new();
+    let scanned = inner.scans.get(&game).unwrap_or(&empty);
+    let matcher = ActiveModMatcher::new(scanned);
+    let mods: Vec<Option<&ScannedMod>> = items.iter().map(|a| matcher.lookup(a).map(|i| &scanned[i])).collect();
+    let mut keep_above: Vec<(usize, usize)> = Vec::new();
+    for upper in 0..mods.len() {
+        for lower in upper + 1..mods.len() {
+            if let (Some(a), Some(b)) = (mods[upper], mods[lower]) {
+                if a.overlaps(b) {
+                    keep_above.push((upper, lower));
+                }
+            }
+        }
+    }
+
+    let order = load_order::auto_sort_preserving(&tokens, &keep_above);
+    let sorted_tokens: Vec<&str> = order.iter().map(|&i| tokens[i].as_str()).collect();
+    let held_indices: Vec<usize> = load_order::build_rows(&sorted_tokens)
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::Mod { index, misplaced: true, .. } => Some(order[index]),
+            _ => None,
+        })
+        .collect();
+    let partners = held_indices
+        .iter()
+        .map(|&k| {
+            let names = keep_above
+                .iter()
+                .filter_map(|&(u, l)| if u == k { Some(l) } else if l == k { Some(u) } else { None })
+                .map(|i| items[i].name.clone())
+                .collect();
+            (items[k].name.clone(), names)
+        })
+        .collect();
+    Ok(SortPlan {
+        sorted: order.iter().enumerate().all(|(position, &i)| position == i),
+        held: held_indices.iter().map(|&k| items[k].name.clone()).collect(),
+        partners,
+        order,
+    })
 }
 
 /// Write the list (display order) to profile.sii after backing the whole
@@ -1175,6 +1353,8 @@ fn open_workshop_item(workshop_id: String) -> CmdResult<()> {
 }
 
 pub fn run() {
+    enter_portable_mode();
+    start_prewarm();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
@@ -1199,7 +1379,7 @@ pub fn run() {
             resolve_items,
             analyze_conflicts,
             layout_rows,
-            auto_sort,
+            sort_plan,
             save_load_order,
             list_backups,
             restore_backup,
