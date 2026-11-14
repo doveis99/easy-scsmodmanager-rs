@@ -8,7 +8,9 @@
 pub mod aem;
 pub mod cityhash;
 pub mod dir;
+pub mod gdeflate;
 pub mod hashfs;
+pub mod tobj_dds;
 pub mod zip;
 
 use std::fs::File;

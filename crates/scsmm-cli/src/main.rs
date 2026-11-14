@@ -22,6 +22,8 @@ USAGE:
     scsmm order    [--game ets2|ats] [--profile <name>] [--sorted]
                                            load order of a profile, grouped;
                                            --sorted previews the automatic sort
+    scsmm extract <archive.scs> <folder>   unpack an archive into an empty folder
+                                           (packed textures come out as .dds)
 ";
 
 struct Args {
@@ -200,6 +202,43 @@ fn cmd_order(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_extract(rest: &[String]) -> Result<(), String> {
+    let [archive, dest] = rest else {
+        return Err("usage: scsmm extract <archive.scs> <folder>".into());
+    };
+    let (archive, dest) = (std::path::Path::new(archive), std::path::Path::new(dest));
+    // never mix an extraction into existing files
+    if dest.exists() && std::fs::read_dir(dest).map_err(|e| e.to_string())?.next().is_some() {
+        return Err(format!("{} is not empty", dest.display()));
+    }
+    let started = Instant::now();
+    let mut last_percent = usize::MAX;
+    let result = scsmm_core::extract::extract_scs(
+        archive,
+        dest,
+        &mut |done, total| {
+            let percent = done * 100 / total.max(1);
+            if percent != last_percent && percent % 10 == 0 {
+                last_percent = percent;
+                eprintln!("  {percent}%  ({done}/{total})");
+            }
+        },
+        &|| false,
+    )
+    .map_err(|e| e.to_string())?;
+    println!(
+        "{} of {} files extracted in {:.2?}, {} failed",
+        result.extracted,
+        result.total,
+        started.elapsed(),
+        result.failed
+    );
+    for f in &result.failures {
+        println!("  failed: {}  ({})", f.entry, f.error);
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let Some((cmd, rest)) = argv.split_first() else {
@@ -211,6 +250,7 @@ fn main() -> ExitCode {
         "scan" => parse_args(rest).and_then(|a| cmd_scan(&a)),
         "profiles" => parse_args(rest).and_then(|a| cmd_profiles(&a)),
         "order" => parse_args(rest).and_then(|a| cmd_order(&a)),
+        "extract" => cmd_extract(rest),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             Ok(())

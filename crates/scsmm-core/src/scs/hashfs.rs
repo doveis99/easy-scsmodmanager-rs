@@ -4,9 +4,9 @@
 //! inside directory-listing entries, so listing the archive means walking
 //! those from the root.
 //!
-//! v2 packed texture entries (.tobj/.dds, GDeflate) are recognised but not
-//! decoded yet: `has` reports them as absent and `read_bytes` refuses them,
-//! exactly like the Python reader's plain-file interface.
+//! v2 packed texture entries (.tobj/.dds, GDeflate) are not standalone
+//! files: `has` reports them as absent and `read_bytes` refuses them.
+//! `read_image_dds` rebuilds a real .dds from one instead.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -14,6 +14,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::cityhash::hash_path;
+use super::tobj_dds::reconstruct_dds;
 use super::{inflate_zlib, ModSource};
 use crate::{format_err, Error, Result};
 
@@ -50,6 +51,8 @@ struct Entry {
     is_directory: bool,
     is_compressed: bool,
     is_image: bool,
+    /// 12-byte texture metadata of an image entry.
+    tobj_meta: Option<[u8; 12]>,
 }
 
 pub struct HashFsReader {
@@ -123,6 +126,7 @@ impl HashFsReader {
                 is_directory: flags & 0x1 != 0,
                 is_compressed: flags & 0x2 != 0,
                 is_image: false,
+                tobj_meta: None,
             });
         }
         Ok(entries)
@@ -160,6 +164,34 @@ impl HashFsReader {
         } else {
             read_at(&mut self.file, entry.offset, entry.size as usize)
         }
+    }
+
+    /// `(all entries, directory listings, packed textures)` in the archive.
+    /// Entries are stored by hash only, so this is the one count that does
+    /// not depend on the directory listings being present.
+    pub fn entry_counts(&self) -> (usize, usize, usize) {
+        let dirs = self.entries.values().filter(|e| e.is_directory).count();
+        let images = self.entries.values().filter(|e| e.is_image).count();
+        (self.entries.len(), dirs, images)
+    }
+
+    /// True for a v2 packed texture, keyed by its `.tobj` path.
+    pub fn is_image_entry(&self, path: &str) -> bool {
+        self.entry(path).is_some_and(|e| e.is_image)
+    }
+
+    /// Rebuild a real .dds from a packed v2 texture entry.
+    pub fn read_image_dds(&mut self, path: &str) -> Result<Vec<u8>> {
+        let entry = self
+            .entry(path)
+            .filter(|e| e.is_image)
+            .ok_or_else(|| format_err(format!("not a packed texture: {path}")))?;
+        let meta = entry
+            .tobj_meta
+            .ok_or_else(|| format_err(format!("texture metadata missing: {path}")))?;
+        let stored = if entry.is_compressed { entry.compressed_size } else { entry.size };
+        let raw = read_at(&mut self.file, entry.offset, stored as usize)?;
+        reconstruct_dds(&meta, &raw, entry.is_compressed)
     }
 
     /// `(subdirectories, files)` named in a directory listing entry.
@@ -298,6 +330,7 @@ fn decode_v2_metadata(meta: &[u8], meta_index: usize, meta_count: usize) -> Opti
                 is_directory: chunk_type == CHUNK_DIRECTORY,
                 is_compressed: compressed,
                 is_image: false,
+                tobj_meta: None,
             })
         }
         CHUNK_IMAGE => {
@@ -310,6 +343,7 @@ fn decode_v2_metadata(meta: &[u8], meta_index: usize, meta_count: usize) -> Opti
                 is_directory: false,
                 is_compressed: compressed,
                 is_image: true,
+                tobj_meta: meta.get(body..body + 12).and_then(|m| m.try_into().ok()),
             })
         }
         _ => None, // unimplemented chunk type - skip
@@ -411,6 +445,103 @@ pub(crate) mod testutil {
         }
         out
     }
+
+    pub enum V2Content<'a> {
+        Plain { data: &'a [u8], compress: bool },
+        /// A packed texture: its 12-byte metadata and GDeflate payload.
+        Image { meta: [u8; 12], payload: &'a [u8], raw_size: u32 },
+    }
+
+    /// Minimal HashFS v2 archive. Directory listings are derived.
+    pub fn build_v2(salt: u16, files: &[(&str, V2Content)]) -> Vec<u8> {
+        use std::collections::BTreeMap;
+        // directory -> names in it (subdirectories carry the '/' marker)
+        let mut dirs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        dirs.entry(String::new()).or_default();
+        for (path, _) in files {
+            let parts: Vec<&str> = path.split('/').collect();
+            let mut parent = String::new();
+            for (i, part) in parts.iter().enumerate() {
+                let is_file = i == parts.len() - 1;
+                let name = if is_file { part.to_string() } else { format!("/{part}") };
+                let listing = dirs.entry(parent.clone()).or_default();
+                if !listing.contains(&name) {
+                    listing.push(name);
+                }
+                if !is_file {
+                    parent = if parent.is_empty() { part.to_string() } else { format!("{parent}/{part}") };
+                    dirs.entry(parent.clone()).or_default();
+                }
+            }
+        }
+
+        // (hash, chunk type, tobj meta, stored bytes, real size, compressed)
+        let mut items: Vec<(u64, u8, Option<[u8; 12]>, Vec<u8>, u32, bool)> = Vec::new();
+        for (path, content) in files {
+            let hash = hash_path(path, salt);
+            match content {
+                V2Content::Plain { data, compress } => {
+                    let stored = if *compress { zlib(data) } else { data.to_vec() };
+                    items.push((hash, super::CHUNK_PLAIN, None, stored, data.len() as u32, *compress));
+                }
+                V2Content::Image { meta, payload, raw_size } => {
+                    items.push((hash, super::CHUNK_IMAGE, Some(*meta), payload.to_vec(), *raw_size, true));
+                }
+            }
+        }
+        for (dir, names) in &dirs {
+            let mut blob = (names.len() as u32).to_le_bytes().to_vec();
+            blob.extend(names.iter().map(|n| n.len() as u8));
+            for n in names {
+                blob.extend_from_slice(n.as_bytes());
+            }
+            let size = blob.len() as u32;
+            items.push((hash_path(dir, salt), super::CHUNK_DIRECTORY, None, blob, size, false));
+        }
+
+        let mut out = vec![0u8; 49];
+        let mut entry_table = Vec::new();
+        let mut meta_table: Vec<u8> = Vec::new();
+        for (hash, chunk, tobj, stored, size, compressed) in &items {
+            while out.len() % super::V2_BLOCK_SIZE as usize != 0 {
+                out.push(0);
+            }
+            let offset_block = (out.len() as u64 / super::V2_BLOCK_SIZE) as u32;
+            out.extend_from_slice(stored);
+
+            let meta_index = (meta_table.len() / super::V2_META_BLOCK) as u32;
+            meta_table.extend_from_slice(&[0, 0, 0, *chunk]); // one chunk header
+            if let Some(tobj) = tobj {
+                meta_table.extend_from_slice(tobj);
+            }
+            let csize = stored.len() as u32 | if *compressed { 0x1000_0000 } else { 0 };
+            meta_table.extend_from_slice(&csize.to_le_bytes());
+            meta_table.extend_from_slice(&size.to_le_bytes());
+            meta_table.extend_from_slice(&0u32.to_le_bytes());
+            meta_table.extend_from_slice(&offset_block.to_le_bytes());
+
+            entry_table.extend_from_slice(&hash.to_le_bytes());
+            entry_table.extend_from_slice(&meta_index.to_le_bytes());
+            entry_table.extend_from_slice(&1u16.to_le_bytes()); // chunk count
+            entry_table.extend_from_slice(&0u16.to_le_bytes());
+        }
+        let (entry_z, meta_z) = (zlib(&entry_table), zlib(&meta_table));
+        let entry_start = out.len() as u64;
+        out.extend_from_slice(&entry_z);
+        let meta_start = out.len() as u64;
+        out.extend_from_slice(&meta_z);
+
+        out[0..4].copy_from_slice(&super::MAGIC.to_le_bytes());
+        out[4..6].copy_from_slice(&2u16.to_le_bytes());
+        out[6..8].copy_from_slice(&salt.to_le_bytes());
+        out[8..12].copy_from_slice(b"CITY");
+        out[12..16].copy_from_slice(&(items.len() as u32).to_le_bytes());
+        out[16..20].copy_from_slice(&(entry_z.len() as u32).to_le_bytes());
+        out[24..28].copy_from_slice(&(meta_z.len() as u32).to_le_bytes());
+        out[28..36].copy_from_slice(&entry_start.to_le_bytes());
+        out[36..44].copy_from_slice(&meta_start.to_le_bytes());
+        out
+    }
 }
 
 #[cfg(test)]
@@ -470,5 +601,45 @@ mod tests {
         let (dirs, files) = parse_listing_v2(&blob);
         assert_eq!(dirs, vec!["def"]);
         assert_eq!(files, vec!["manifest.sii", "ab"]);
+    }
+
+    #[test]
+    fn reads_a_v2_archive_with_a_packed_texture() {
+        use testutil::V2Content;
+        let meta: [u8; 12] = *include_bytes!("../../fixtures/scs_textures/tex0.tobj12");
+        let payload = include_bytes!("../../fixtures/scs_textures/tex0.gdeflate");
+        let expected = include_bytes!("../../fixtures/scs_textures/tex0.dds");
+        let manifest = b"SiiNunit{mod_package:.p{display_name:\"V2\"}}";
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.scs");
+        std::fs::write(
+            &path,
+            testutil::build_v2(
+                5,
+                &[
+                    ("manifest.sii", V2Content::Plain { data: manifest, compress: true }),
+                    ("def/a.sii", V2Content::Plain { data: b"plain", compress: false }),
+                    ("material/ui/tex0.tobj", V2Content::Image { meta, payload, raw_size: 25104 }),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let mut r = HashFsReader::open(&path).unwrap();
+        assert_eq!(r.read_bytes("manifest.sii").unwrap(), manifest);
+        assert_eq!(r.read_bytes("def/a.sii").unwrap(), b"plain");
+        assert_eq!(
+            r.iter_files(),
+            vec!["/def/a.sii", "/manifest.sii", "/material/ui/tex0.tobj"]
+        );
+        // the texture is not a plain file...
+        assert!(r.is_image_entry("material/ui/tex0.tobj"));
+        assert!(!r.is_image_entry("manifest.sii"));
+        assert!(!r.has("material/ui/tex0.tobj"));
+        assert!(r.read_bytes("material/ui/tex0.tobj").is_err());
+        // ...but rebuilds into the reference .dds
+        assert_eq!(r.read_image_dds("material/ui/tex0.tobj").unwrap(), expected);
+        assert!(r.read_image_dds("manifest.sii").is_err());
     }
 }

@@ -10,6 +10,7 @@
 pub mod categories;
 pub mod compat;
 pub mod conflicts;
+pub mod extract;
 pub mod game;
 pub mod identity;
 pub mod load_order;

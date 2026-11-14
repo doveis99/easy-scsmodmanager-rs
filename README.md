@@ -30,6 +30,7 @@ pnpm portable
 - **창작마당 정보**: 이름이 없는 창작마당 모드의 제목과 미리보기를 Steam 공개 API에서 가져옵니다. 설정에서 끌 수 있습니다.
 - **공유**: 로드 순서를 파일로 내보내고 가져옵니다. 다른 사람의 `profile.sii`와 맵 콤보도 읽습니다. 파일 형식은 원본 앱과 같습니다.
 - **모드 관리**: 상세 보기, 즐겨찾기, 휴지통으로 삭제, 파일 위치 열기.
+- **아카이브 추출** (명령줄): 모드나 게임의 `.scs` 아카이브를 폴더로 풉니다. HashFS v2의 압축 텍스처는 `.dds` 파일로 복원합니다. 파일 목록을 숨긴 아카이브는 이름을 알 수 있는 파일만 추출됩니다.
 
 원본에 있지만 옮기지 않은 것: 온라인 공유 코드, 자동 업데이트, 영어·독일어 화면, Linux·macOS 패키징.
 
@@ -62,6 +63,7 @@ pnpm clean --all      # target 폴더 전체 삭제
 cargo run -p scsmm-cli -- installs
 cargo run -p scsmm-cli -- scan --game ets2
 cargo run -p scsmm-cli -- order --game ets2
+cargo run -p scsmm-cli -- extract <아카이브.scs> <빈 폴더>
 ```
 
 ## 라이선스
