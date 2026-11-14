@@ -73,6 +73,13 @@ interface ConflictReport {
   frequent: Record<string, { file: string; owners: number }[]>;
 }
 
+interface WorkshopFetch {
+  asked: number;
+  titles: number;
+  previews: number;
+  error: string | null;
+}
+
 interface Constants {
   categories: string[];
   groups: string[];
@@ -266,10 +273,36 @@ async function loadGame(game: GameId) {
         (unreadable ? ` 읽지 못한 모드 ${unreadable}개.` : ""),
       "ok",
     );
+    void refreshWorkshop();
   } catch (e) {
     if (epoch !== state.epoch) return;
     renderAll();
     setStatus(errorText(e), "error");
+  }
+}
+
+/** Ask Steam for names and previews of workshop mods that lack them. Runs
+ *  in the background after a scan; the grid is redrawn only if something
+ *  new arrived. Being offline is not an error worth interrupting for. */
+async function refreshWorkshop() {
+  const epoch = state.epoch;
+  const game = state.game;
+  try {
+    const r = await invoke<WorkshopFetch>("fetch_workshop_meta", { game });
+    if (epoch !== state.epoch) return;
+    if (r.titles + r.previews === 0) {
+      if (r.error) console.warn("workshop lookup:", r.error);
+      return;
+    }
+    const mods = await invoke<Mod[]>("mods_snapshot", { game });
+    if (epoch !== state.epoch) return;
+    state.mods = mods;
+    // cards that had no icon before may have a preview now
+    for (const [key, url] of icons) if (url === null) icons.delete(key);
+    renderLibrary();
+    setStatus(`창작마당에서 이름 ${r.titles}개, 미리보기 ${r.previews}개를 받아 왔습니다.`, "ok");
+  } catch (e) {
+    console.warn("workshop lookup failed:", errorText(e));
   }
 }
 

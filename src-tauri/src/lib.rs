@@ -23,6 +23,7 @@ use scsmm_core::manifest::sniff_image_mime;
 use scsmm_core::profile::{self, ActiveMod};
 use scsmm_core::scanner::{self, ScannedMod};
 use scsmm_core::steam;
+use scsmm_core::workshop_api::{self, WorkshopCache};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -39,13 +40,30 @@ struct Inner {
     versions: HashMap<Game, Option<String>>,
     /// mod name -> category token, per game. Loaded lazily from disk.
     overrides: Option<HashMap<String, HashMap<String, String>>>,
+    /// active name -> display name as the game wrote it into the profiles.
+    profile_names: HashMap<Game, HashMap<String, String>>,
+    /// Steam Workshop titles and previews. Loaded lazily from disk.
+    workshop: Option<WorkshopCache>,
 }
 
 fn overrides_path() -> PathBuf {
     profile::default_data_dir().join("category_overrides.json")
 }
 
+/// Cache, not data: everything in here can be fetched again.
+fn workshop_cache_dir() -> PathBuf {
+    match std::env::var_os("LOCALAPPDATA") {
+        Some(local) if cfg!(windows) => PathBuf::from(local).join("easy-scsmodmanager-rs").join("workshop"),
+        _ => profile::default_data_dir().join("cache").join("workshop"),
+    }
+}
+
 impl Inner {
+    fn workshop(&mut self) -> &mut WorkshopCache {
+        self.workshop
+            .get_or_insert_with(|| WorkshopCache::open(&workshop_cache_dir()))
+    }
+
     fn overrides(&mut self) -> &mut HashMap<String, HashMap<String, String>> {
         self.overrides.get_or_insert_with(|| {
             fs::read(overrides_path())
@@ -169,6 +187,7 @@ fn mod_dto(
     display_name: String,
     category_override: Option<String>,
     game_version: Option<&str>,
+    has_icon: bool,
 ) -> ModDto {
     let id = m.mod_name();
     let categories = m.effective_categories(category_override.as_deref());
@@ -197,7 +216,7 @@ fn mod_dto(
         description: m.description.clone(),
         compat: compat_status(game_version, &manifest.compatible_versions),
         compatible_versions: manifest.compatible_versions,
-        has_icon: m.icon.as_deref().and_then(sniff_image_mime).is_some(),
+        has_icon,
         id,
     }
 }
@@ -228,6 +247,53 @@ fn get_installs() -> Vec<InstallInfo> {
         .collect()
 }
 
+/// DTOs for the last scan of `game`, with names and icons filled in from
+/// the profile and the workshop cache where the mod itself has none.
+fn build_dtos(inner: &mut Inner, game: Game) -> Vec<ModDto> {
+    // force the lazy loads first so the fields can be borrowed side by side
+    inner.overrides();
+    inner.workshop();
+    let Inner {
+        scans,
+        versions,
+        overrides,
+        profile_names,
+        workshop,
+    } = &*inner;
+    let (Some(mods), Some(workshop)) = (scans.get(&game), workshop.as_ref()) else {
+        return Vec::new();
+    };
+    let version = versions.get(&game).cloned().flatten();
+    let per_game_overrides = overrides.as_ref().and_then(|o| o.get(game.short_name()));
+    let names = profile_names.get(&game);
+    mods.iter()
+        .map(|m| {
+            let id = m.mod_name();
+            let workshop_id = m.workshop_id();
+            // name chain: manifest -> the profile's active entry -> the
+            // workshop title -> the file stem
+            let has_name = m.manifest.as_ref().is_some_and(|mf| !mf.display_name.is_empty());
+            let borrowed = names
+                .and_then(|n| n.get(&id))
+                .map(String::as_str)
+                .or_else(|| workshop_id.as_deref().and_then(|w| workshop.title(w)));
+            let display = match borrowed {
+                Some(name) if !has_name => name.to_string(),
+                _ => m.display_name(),
+            };
+            let has_icon = own_icon(m).is_some()
+                || workshop_id.as_deref().is_some_and(|w| workshop.has_preview(w));
+            let pinned = per_game_overrides.and_then(|o| o.get(&id)).cloned();
+            mod_dto(m, display, pinned, version.as_deref(), has_icon)
+        })
+        .collect()
+}
+
+/// The mod's own icon, when it is an image the webview can show.
+fn own_icon(m: &ScannedMod) -> Option<&[u8]> {
+    m.icon.as_deref().filter(|bytes| sniff_image_mime(bytes).is_some())
+}
+
 /// Scan the game's mod folder and workshop tree. Runs off the UI thread.
 #[tauri::command(async)]
 fn scan_mods(game: String, state: State<'_, AppState>) -> CmdResult<Vec<ModDto>> {
@@ -252,36 +318,113 @@ fn scan_mods(game: String, state: State<'_, AppState>) -> CmdResult<Vec<ModDto>>
     }
 
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    let dtos = mods
-        .iter()
-        .map(|m| {
-            let id = m.mod_name();
-            let has_name = m.manifest.as_ref().is_some_and(|mf| !mf.display_name.is_empty());
-            let display = match profile_names.get(&id) {
-                Some(name) if !has_name => name.clone(),
-                _ => m.display_name(),
-            };
-            mod_dto(m, display, inner.override_for(game, &id), version.as_deref())
-        })
-        .collect();
     inner.scans.insert(game, mods);
     inner.versions.insert(game, version);
-    Ok(dtos)
+    inner.profile_names.insert(game, profile_names);
+    Ok(build_dtos(&mut inner, game))
 }
 
-/// The mod's icon as a data URL, or null.
+/// The last scan again, without rescanning - used after workshop names or
+/// previews arrived.
+#[tauri::command]
+fn mods_snapshot(game: String, state: State<'_, AppState>) -> CmdResult<Vec<ModDto>> {
+    let game = parse_game(&game)?;
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    Ok(build_dtos(&mut inner, game))
+}
+
+#[derive(Serialize, Default)]
+struct WorkshopFetch {
+    /// Workshop ids looked up on Steam this time.
+    asked: usize,
+    /// Titles received.
+    titles: usize,
+    /// Preview images downloaded.
+    previews: usize,
+    error: Option<String>,
+}
+
+/// Look up names and preview images of the scanned workshop mods on Steam.
+///
+/// Only ids that are not cached yet (or are stale) are sent, and previews
+/// are downloaded only for mods without an icon of their own. No lock is
+/// held while the network is in use.
+#[tauri::command(async)]
+fn fetch_workshop_meta(game: String, state: State<'_, AppState>) -> CmdResult<WorkshopFetch> {
+    let game = parse_game(&game)?;
+    let mut result = WorkshopFetch::default();
+
+    // workshop id -> whether the mod ships its own icon
+    let (ids, to_fetch): (Vec<(String, bool)>, Vec<String>) = {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        let ids: Vec<(String, bool)> = inner
+            .scans
+            .get(&game)
+            .map(|mods| {
+                mods.iter()
+                    .filter_map(|m| Some((m.workshop_id()?, own_icon(m).is_some())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let to_fetch = inner.workshop().missing_or_stale(ids.iter().map(|(id, _)| id.as_str()));
+        (ids, to_fetch)
+    };
+
+    let agent = workshop_api::agent();
+    if !to_fetch.is_empty() {
+        let outcome = workshop_api::fetch_metadata(&agent, &to_fetch);
+        result.asked = outcome.answered.len();
+        result.titles = outcome.found.values().filter(|m| m.title.is_some()).count();
+        result.error = outcome.error;
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        inner
+            .workshop()
+            .store(&outcome.answered, outcome.found)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // previews: only where the mod has no icon and none is stored yet
+    let wanted: Vec<(String, String)> = {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        let cache = inner.workshop();
+        ids.iter()
+            .filter(|(id, has_own_icon)| !has_own_icon && !cache.has_preview(id))
+            .filter_map(|(id, _)| Some((id.clone(), cache.get(id)?.preview_url.clone()?)))
+            .collect()
+    };
+    let writer = WorkshopCache::open(&workshop_cache_dir());
+    for (id, url) in wanted {
+        match workshop_api::fetch_preview(&agent, &url).and_then(|bytes| writer.write_preview(&id, &bytes)) {
+            Ok(()) => result.previews += 1,
+            Err(e) => result.error = Some(e.to_string()),
+        }
+    }
+    Ok(result)
+}
+
+/// The mod's icon as a data URL, or null. Falls back to the cached
+/// workshop preview when the mod ships no icon.
 #[tauri::command]
 fn mod_icon(game: String, id: String, state: State<'_, AppState>) -> CmdResult<Option<String>> {
     let game = parse_game(&game)?;
-    let inner = state.inner.lock().map_err(|e| e.to_string())?;
-    let icon = inner
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    inner.workshop();
+    let Some(m) = inner
         .scans
         .get(&game)
         .and_then(|mods| mods.iter().find(|m| m.mod_name() == id))
-        .and_then(|m| m.icon.as_deref());
-    Ok(icon.and_then(|bytes| {
-        let mime = sniff_image_mime(bytes)?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    else {
+        return Ok(None);
+    };
+    let bytes = match own_icon(m) {
+        Some(own) => Some(own.to_vec()),
+        None => m
+            .workshop_id()
+            .and_then(|w| inner.workshop.as_ref()?.read_preview(&w)),
+    };
+    Ok(bytes.and_then(|bytes| {
+        let mime = sniff_image_mime(&bytes)?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Some(format!("data:{mime};base64,{b64}"))
     }))
 }
@@ -450,6 +593,8 @@ pub fn run() {
             get_installs,
             scan_mods,
             mod_icon,
+            mods_snapshot,
+            fetch_workshop_meta,
             list_profiles,
             read_load_order,
             resolve_items,

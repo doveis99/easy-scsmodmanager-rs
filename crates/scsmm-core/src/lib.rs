@@ -20,6 +20,7 @@ pub mod scs;
 pub mod sii;
 pub mod steam;
 pub mod workshop;
+pub mod workshop_api;
 
 use std::io;
 
