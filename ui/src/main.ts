@@ -100,6 +100,17 @@ interface ConflictReport {
   frequent: Record<string, { file: string; owners: number }[]>;
 }
 
+/** How one active mod hangs together with others, by active name. A mod
+ *  that overwrites a file which only another mod brings was made for it. */
+interface ModRelations {
+  /** Mods above it that overwrite files only it brings: its patches and add-ons. */
+  patches: string[];
+  /** Mods below it whose own files it overwrites: what it was made for. */
+  bases: string[];
+  /** Everything that builds on it, directly or through another patch. */
+  dependents: string[];
+}
+
 interface GameSettings {
   documents_dir: string | null;
   workshop_dir: string | null;
@@ -236,6 +247,8 @@ const state = {
   saved: "[]",
   layout: { rows: [], misplaced: 0 } as Layout,
   conflicts: { overrides: {}, frequent: {} } as ConflictReport,
+  /** Patches and bases of the active mods that have any. */
+  relations: {} as Record<string, ModRelations>,
   plan: NO_PLAN,
   /** Presets of the current game. */
   presets: [] as Preset[],
@@ -293,6 +306,7 @@ async function loadGame(game: GameId) {
   // the old layout indexes into the list that was just cleared
   state.layout = { rows: [], misplaced: 0 };
   state.conflicts = { overrides: {}, frequent: {} };
+  state.relations = {};
   state.plan = NO_PLAN;
   state.presets = [];
   state.basePreset = null;
@@ -398,14 +412,16 @@ function activeEntries(items: ActiveItem[] = state.active) {
 /** Recompute group headers and conflicts for the current list and redraw. */
 async function relayout() {
   const epoch = state.epoch;
-  const [layout, conflicts, plan] = await Promise.all([
+  const [layout, conflicts, relations, plan] = await Promise.all([
     invoke<Layout>("layout_rows", { tokens: state.active.map((a) => a.token) }),
     invoke<ConflictReport>("analyze_conflicts", { game: state.game, items: activeEntries() }),
+    invoke<Record<string, ModRelations>>("mod_relations", { game: state.game, items: activeEntries() }),
     invoke<SortPlan>("sort_plan", { game: state.game, items: activeEntries() }),
   ]);
   if (epoch !== state.epoch) return;
   state.layout = layout;
   state.conflicts = conflicts;
+  state.relations = relations;
   state.plan = plan;
   renderAll();
 }
@@ -810,6 +826,7 @@ function renderOrder() {
     }),
     tail,
   );
+  paintRelations();
 }
 
 function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLElement {
@@ -827,6 +844,8 @@ function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLEle
     },
     h("span", { class: "grip", "aria-hidden": "true" }, "⋮⋮"),
     h("span", { class: "row-name" }, item.display_name || item.name),
+    // filled in by paintRelations for the rows that belong to a picked one
+    h("span", { class: "badge rel", hidden: true }),
     row.misplaced ? placementBadge(row, item) : null,
     item.installed ? null : h("span", { class: "badge err" }, t("badge.notInstalled")),
     item.compat === "incompatible"
@@ -863,9 +882,49 @@ async function addActive(m: Mod) {
   await relayout();
 }
 
+/** Take a mod out of the load order. Where other active mods look like
+ *  patches or add-ons made for it, ask first whether they go with it. */
 async function removeActive(name: string) {
-  state.active = state.active.filter((a) => a.name !== name);
+  const item = state.active.find((a) => a.name === name);
+  if (!item) return;
+  const active = activeNames();
+  const dependents = (state.relations[name]?.dependents ?? []).filter((n) => active.has(n));
+  const gone = new Set([name]);
+  if (dependents.length) {
+    const choice = await askAboutDependents(item, dependents);
+    if (choice === "cancel") return;
+    if (choice === "all") for (const n of dependents) gone.add(n);
+  }
+  state.active = state.active.filter((a) => !gone.has(a.name));
   await relayout();
+  if (gone.size > 1) {
+    setStatus(
+      t("remove.doneAll", { name: item.display_name || item.name, n: gone.size - 1 }) + t("sort.saveNote"),
+      "ok",
+    );
+  }
+}
+
+/** The mods that build on `item` are about to lose their base: let the
+ *  user take them out too, take out only `item`, or leave things alone. */
+function askAboutDependents(item: ActiveItem, dependents: string[]): Promise<"cancel" | "only" | "all"> {
+  const body = h(
+    "div",
+    { class: "form" },
+    h("div", {}, t("remove.body", { n: dependents.length })),
+    h("ul", { class: "name-list" }, ...dependents.map((n) => h("li", {}, displayNameOf(n)))),
+    h("div", { class: "form-note" }, t("remove.note")),
+  );
+  return openDialog<"cancel" | "only" | "all">({
+    title: t("remove.title", { name: item.display_name || item.name }),
+    body,
+    dismiss: "cancel",
+    buttons: [
+      { label: t("common.cancel"), value: "cancel" },
+      { label: t("remove.all", { n: dependents.length }), value: "all", kind: "primary" },
+      { label: t("remove.only"), value: "only" },
+    ],
+  });
 }
 
 async function moveActive(from: number, insertAt: number) {
@@ -887,7 +946,43 @@ function paintSelection() {
     row.classList.toggle("selected", picked);
     row.setAttribute("aria-selected", String(picked));
   }
+  paintRelations();
   renderCopyPaste();
+}
+
+type Relation = "patch" | "base" | "both";
+
+/** What each mod is to the picked ones: a patch of one of them, the base
+ *  of one, or both. The picked mods themselves are not in it. */
+function relatedToSelection(): Map<string, Relation> {
+  const out = new Map<string, Relation>();
+  const mark = (name: string, kind: "patch" | "base") => {
+    const had = out.get(name);
+    out.set(name, had && had !== kind ? "both" : kind);
+  };
+  for (const item of state.selection) {
+    const relations = state.relations[item.name];
+    for (const name of relations?.patches ?? []) mark(name, "patch");
+    for (const name of relations?.bases ?? []) mark(name, "base");
+  }
+  for (const item of state.selection) out.delete(item.name);
+  return out;
+}
+
+/** Highlight the rows that belong to the picked ones and say what they
+ *  are to them. Like paintSelection, this leaves the rows in place. */
+function paintRelations() {
+  const related = relatedToSelection();
+  for (const row of $("rows").querySelectorAll<HTMLElement>(".row.mod")) {
+    const kind = related.get(state.active[Number(row.dataset.index)]?.name ?? "");
+    if (kind) row.dataset.rel = kind;
+    else delete row.dataset.rel;
+    const tag = row.querySelector<HTMLElement>(".badge.rel");
+    if (!tag) continue;
+    tag.hidden = !kind;
+    tag.textContent = kind ? t(`rel.${kind}`) : "";
+    tag.title = kind ? t(`rel.${kind}Title`) : "";
+  }
 }
 
 /** A click on a row: alone it picks just that row (or lets go of it),

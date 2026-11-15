@@ -20,6 +20,7 @@ pub mod manifest;
 pub mod presets;
 pub mod profile;
 pub mod recover;
+pub mod relations;
 pub mod scanner;
 pub mod scs;
 pub mod settings;

@@ -25,6 +25,7 @@ use scsmm_core::load_order::{self, Row, GROUPS, MAP_BASE};
 use scsmm_core::manifest::sniff_image_mime;
 use scsmm_core::presets::{default_presets_path, Preset, PresetError, PresetStore};
 use scsmm_core::profile::{self, ActiveMod};
+use scsmm_core::relations;
 use scsmm_core::scanner::{self, ScannedMod};
 use scsmm_core::extract::{extract_scs_with, ExtractOptions, ExtractResult};
 use scsmm_core::gamepaths::GamePaths;
@@ -1308,6 +1309,53 @@ fn analyze_conflicts(game: String, items: Vec<ActiveMod>, state: State<'_, AppSt
     Ok(conflicts::analyze(&active))
 }
 
+/// The relations of one active mod, by active name, in display order.
+#[derive(Serialize)]
+struct RelationsDto {
+    /// Mods above it that overwrite files only it brings.
+    patches: Vec<String>,
+    /// Mods below it whose own files it overwrites.
+    bases: Vec<String>,
+    /// Everything that builds on it, directly or through another patch.
+    dependents: Vec<String>,
+}
+
+/// Which active mods (display order, top first) are a patch or add-on of
+/// which other one. Mods without any relation are left out.
+#[tauri::command]
+fn mod_relations(
+    game: String,
+    items: Vec<ActiveMod>,
+    state: State<'_, AppState>,
+) -> CmdResult<HashMap<String, RelationsDto>> {
+    let game = parse_game(&game)?;
+    let inner = lock(&state)?;
+    let empty = Vec::new();
+    let scanned = inner.scans.get(&game).unwrap_or(&empty);
+    let matcher = ActiveModMatcher::new(scanned);
+    // an active entry that is not installed has no files to compare
+    let mods: Vec<Option<&ScannedMod>> = items.iter().map(|a| matcher.lookup(a).map(|i| &scanned[i])).collect();
+    let found = relations::analyze(mods.len(), |upper, lower| match (mods[upper], mods[lower]) {
+        // the same archive listed twice is not its own patch
+        (Some(a), Some(b)) => !std::ptr::eq(a, b) && a.shares_own_files(b),
+        _ => false,
+    });
+    let names = |indices: &[usize]| indices.iter().map(|&i| items[i].name.clone()).collect();
+    Ok(found
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| !r.is_empty())
+        .map(|(i, r)| {
+            let dto = RelationsDto {
+                patches: names(&r.patches),
+                bases: names(&r.bases),
+                dependents: names(&r.dependents),
+            };
+            (items[i].name.clone(), dto)
+        })
+        .collect())
+}
+
 /// Group headers and misplacement flags for tokens in display order.
 #[tauri::command]
 fn layout_rows(tokens: Vec<String>) -> Layout {
@@ -1767,6 +1815,7 @@ pub fn run() {
             read_load_order,
             resolve_items,
             analyze_conflicts,
+            mod_relations,
             layout_rows,
             sort_plan,
             save_load_order,

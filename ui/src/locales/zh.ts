@@ -133,7 +133,7 @@ export const zh: Messages = {
   "order.conflicts": "查看冲突",
   "order.autoSort": "自动排序",
   "order.revert": "还原",
-  "order.hint": "越靠上的模组越晚加载，优先级越高。可以拖动，或按 Alt+↑/↓ 调整顺序。点击（按住 Ctrl 或 Shift 可多选）选中模组后可以复制。",
+  "order.hint": "越靠上的模组越晚加载，优先级越高。可以拖动，或按 Alt+↑/↓ 调整顺序。点击（按住 Ctrl 或 Shift 可多选）选中模组后可以复制，同时会标出它的补丁和基础模组。",
   "order.active": "已启用 {n} 个",
   "order.misplaced": " · {n} 个不在所属分组",
   "order.held": " · {n} 个保持顺序",
@@ -169,6 +169,22 @@ export const zh: Messages = {
   "conflict.full": "全部被覆盖",
   "conflict.partial": "部分被覆盖",
   "conflict.frequent": "经常共用的文件",
+
+  // ---- related mods: a mod and the patches and add-ons made for it
+  "rel.patch": "补丁",
+  "rel.patchTitle": "它覆盖了只有所选模组才有的文件，看起来是为所选模组制作的补丁或附加模组。",
+  "rel.base": "基础",
+  "rel.baseTitle": "所选模组覆盖了只有这个模组才有的文件，看起来它是所选模组的基础模组。",
+  "rel.both": "补丁 · 基础",
+  "rel.bothTitle": "它是所选模组中某一个的补丁，同时又是另一个的基础。",
+  "remove.title": "停用“{name}”",
+  "remove.body":
+    "有 {n} 个已启用的模组覆盖了只有这个模组才有的文件。它们看起来是为这个模组制作的补丁或附加模组，没有它可能无法正常工作。",
+  "remove.note":
+    "这是根据文件推断的关系，可能与实际不符。其中也包括通过其他模组间接关联的模组（例如补丁的补丁）。保存之前可以用“还原”恢复原状。",
+  "remove.all": "一并停用",
+  "remove.only": "只停用这个模组",
+  "remove.doneAll": "已停用“{name}”及其 {n} 个补丁或附加模组。",
 
   // ---- status line
   "status.scanning": "正在扫描模组…",

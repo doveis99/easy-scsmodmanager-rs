@@ -132,7 +132,7 @@ export const ko = {
   "order.conflicts": "충돌 보기",
   "order.autoSort": "자동 정렬",
   "order.revert": "되돌리기",
-  "order.hint": "위쪽일수록 나중에 로드되어 우선순위가 높습니다. 끌거나 Alt+↑/↓로 순서를 바꾸고, 클릭(Ctrl·Shift로 여러 개)으로 골라 복사할 수 있습니다.",
+  "order.hint": "위쪽일수록 나중에 로드되어 우선순위가 높습니다. 끌거나 Alt+↑/↓로 순서를 바꾸고, 클릭(Ctrl·Shift로 여러 개)으로 골라 복사할 수 있습니다. 모드를 고르면 그 모드의 패치와 베이스가 함께 표시됩니다.",
   "order.active": "활성 {n}개",
   "order.misplaced": " · 그룹에 맞지 않는 모드 {n}개",
   "order.held": " · 순서 유지 {n}개",
@@ -170,6 +170,23 @@ export const ko = {
   "conflict.full": "전부 덮어써짐",
   "conflict.partial": "일부 덮어써짐",
   "conflict.frequent": "흔히 공유되는 파일",
+
+  // ---- related mods: a mod and the patches and add-ons made for it
+  "rel.patch": "패치",
+  "rel.patchTitle":
+    "고른 모드에만 있는 파일을 덮어씁니다. 고른 모드를 고치거나 확장하는 패치·애드온으로 보입니다.",
+  "rel.base": "베이스",
+  "rel.baseTitle": "고른 모드가 이 모드에만 있는 파일을 덮어씁니다. 고른 모드의 바탕이 되는 모드로 보입니다.",
+  "rel.both": "패치 · 베이스",
+  "rel.bothTitle": "고른 모드 중 하나에는 패치이고, 다른 하나에는 베이스입니다.",
+  "remove.title": "'{name}' 비활성화",
+  "remove.body":
+    "활성 모드 {n}개가 이 모드에만 있는 파일을 덮어씁니다. 이 모드를 고치거나 확장하는 패치·애드온으로 보이며, 이 모드 없이는 제대로 동작하지 않을 수 있습니다.",
+  "remove.note":
+    "파일 구성으로 추정한 관계라서 실제와 다를 수 있습니다. 패치의 패치처럼 다른 모드를 거쳐 이어진 모드도 포함합니다. 저장하기 전에는 '되돌리기'로 원래대로 돌릴 수 있습니다.",
+  "remove.all": "함께 비활성화",
+  "remove.only": "이 모드만 비활성화",
+  "remove.doneAll": "'{name}'과(와) 그 패치·애드온 {n}개를 비활성화했습니다.",
 
   // ---- status line
   "status.scanning": "모드를 스캔하는 중…",

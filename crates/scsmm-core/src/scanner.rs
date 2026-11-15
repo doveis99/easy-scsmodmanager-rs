@@ -51,6 +51,15 @@ pub struct ScannedMod {
     /// load order matters. Shared, because scans are cloned around.
     #[serde(skip)]
     pub file_hashes: Arc<[u64]>,
+    /// Fingerprint of the files this mod brings on its own: the entries of
+    /// `file_hashes` whose path the game does not have, without the
+    /// `automat/` materials (exporters name those by content, so unrelated
+    /// mods carry identical ones). Two mods sharing an entry here do more
+    /// than replace the same file of the game: one overwrites a file only
+    /// the other introduces - a patch or add-on and the mod it is made
+    /// for. Without the game's path list every file counts.
+    #[serde(skip)]
+    pub own_hashes: Arc<[u64]>,
     /// Hashes of the files the archive holds without listing them - a
     /// "locked" archive. Empty for everything that lists its files.
     #[serde(skip)]
@@ -142,6 +151,7 @@ impl ScannedMod {
             is_map: false,
             def_files: Vec::new(),
             file_hashes: Arc::from([]),
+            own_hashes: Arc::from([]),
             hidden: Arc::from([]),
             hidden_named: 0,
             installed_at: 0.0,
@@ -153,18 +163,28 @@ impl ScannedMod {
     /// True when both mods carry a file at the same path - whichever sits
     /// higher in the load order wins it.
     pub fn overlaps(&self, other: &ScannedMod) -> bool {
-        // both sides are sorted: walk them together
-        let (a, b) = (&self.file_hashes, &other.file_hashes);
-        let (mut i, mut j) = (0, 0);
-        while i < a.len() && j < b.len() {
-            match a[i].cmp(&b[j]) {
-                std::cmp::Ordering::Less => i += 1,
-                std::cmp::Ordering::Greater => j += 1,
-                std::cmp::Ordering::Equal => return true,
-            }
-        }
-        false
+        intersects(&self.file_hashes, &other.file_hashes)
     }
+
+    /// True when one of the two overwrites a file that only the other
+    /// brings (see `own_hashes`): the one higher in the load order is a
+    /// patch or add-on for the one below it.
+    pub fn shares_own_files(&self, other: &ScannedMod) -> bool {
+        intersects(&self.own_hashes, &other.own_hashes)
+    }
+}
+
+/// Whether two sorted lists have an element in common.
+fn intersects(a: &[u64], b: &[u64]) -> bool {
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => return true,
+        }
+    }
+    false
 }
 
 /// Scan the install's `mod/` directory and workshop tree.
@@ -353,8 +373,13 @@ struct ListingFacts {
     is_map: bool,
     def_files: Vec<String>,
     file_hashes: Arc<[u64]>,
+    own_hashes: Arc<[u64]>,
     hidden: Arc<[u64]>,
 }
+
+/// Materials the exporter generates and names by their content: the same
+/// file turns up in mods that have nothing to do with each other.
+const GENERATED_PREFIX: &str = "automat/";
 
 /// Root-level files a mod may carry besides the ones its manifest names.
 /// They exist in every mod and say nothing about load order.
@@ -377,12 +402,14 @@ const ROOT_FILE_NAMES: &[&str] = &[
 
 /// `files` is the listing by name; `table_hashes` the container's own
 /// path hashes when it has them (complete even where the listing is not);
-/// `root_names` the root-level files the manifest points at.
+/// `root_names` the root-level files the manifest points at; `game` the
+/// game's own paths, to tell a file the mod brings from one it replaces.
 fn listing_facts(
     files: &[String],
     table_hashes: Option<Vec<u64>>,
     root_names: &[&str],
     owned_dlc: Option<&BTreeSet<String>>,
+    game: Option<&GamePaths>,
 ) -> ListingFacts {
     // normalise the 1.48 package layers once, before both signals derive
     // from them; dedupe keeping first-seen order
@@ -401,11 +428,18 @@ fn listing_facts(
         .collect();
     // every mounted file below the root; root-level files (manifest.sii,
     // icon, description) exist in every mod and never conflict meaningfully
-    let mut hashes: Vec<u64> = normalized
-        .iter()
-        .filter(|p| p.contains('/') && !p.ends_with('/'))
-        .map(|p| city_hash64(p.as_bytes()))
-        .collect();
+    let mut hashes: Vec<u64> = Vec::new();
+    // the ones among them that the game does not have (it spells its
+    // paths in lower case)
+    let mut own: Vec<u64> = Vec::new();
+    for path in normalized.iter().filter(|p| p.contains('/') && !p.ends_with('/')) {
+        let hash = city_hash64(path.as_bytes());
+        hashes.push(hash);
+        let lower = path.to_ascii_lowercase();
+        if !lower.starts_with(GENERATED_PREFIX) && game.is_none_or(|g| !g.contains(city_hash64(lower.as_bytes()))) {
+            own.push(hash);
+        }
+    }
     let mut hidden: Vec<u64> = Vec::new();
     if let Some(table) = table_hashes {
         // the table also holds the root-level files; drop the ones we can
@@ -426,18 +460,23 @@ fn listing_facts(
         for hash in table.into_iter().filter(|h| !root.contains(h)) {
             if !listed.contains(&hash) {
                 hidden.push(hash);
+                // nameless, so only the game can tell whose file it is
+                if game.is_none_or(|g| !g.contains(hash)) {
+                    own.push(hash);
+                }
             }
             hashes.push(hash);
         }
     }
-    hashes.sort_unstable();
-    hashes.dedup();
-    hidden.sort_unstable();
-    hidden.dedup();
+    for list in [&mut hashes, &mut own, &mut hidden] {
+        list.sort_unstable();
+        list.dedup();
+    }
     ListingFacts {
         is_map,
         def_files,
         file_hashes: Arc::from(hashes),
+        own_hashes: Arc::from(own),
         hidden: Arc::from(hidden),
     }
 }
@@ -503,7 +542,7 @@ fn from_bundle(
 ) -> ScannedMod {
     let root_names = [bundle.manifest.icon.as_str(), bundle.manifest.description_file.as_str()];
     let files = source.list_files();
-    let facts = listing_facts(&files, source.path_hashes(), &root_names, ctx.owned_dlc);
+    let facts = listing_facts(&files, source.path_hashes(), &root_names, ctx.owned_dlc, ctx.game);
     let evidence = gather_evidence(source, &files, &facts.hidden, ctx);
     ScannedMod {
         path: path.to_path_buf(),
@@ -514,6 +553,7 @@ fn from_bundle(
         is_map: facts.is_map,
         def_files: facts.def_files,
         file_hashes: facts.file_hashes,
+        own_hashes: facts.own_hashes,
         hidden: facts.hidden,
         hidden_named: 0,
         installed_at: 0.0,
@@ -667,7 +707,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let facts = listing_facts(&files, None, &[], None);
+        let facts = listing_facts(&files, None, &[], None, None);
         assert!(facts.is_map);
         assert_eq!(facts.def_files, vec!["def/a.sii"]);
         // def/a.sii (once, though listed twice), map/x.mbd and ui/b.mat
@@ -878,7 +918,7 @@ mod tests {
         let mk = |files: &[&str]| {
             let files: Vec<String> = files.iter().map(|s| s.to_string()).collect();
             let mut m = ScannedMod::failed(Path::new("x.scs"), ScsFormat::Zip, "");
-            m.file_hashes = listing_facts(&files, None, &[], None).file_hashes;
+            m.file_hashes = listing_facts(&files, None, &[], None, None).file_hashes;
             m
         };
         let sound = mk(&["manifest.sii", "icon.jpg", "sound/truck/engine.bank"]);
@@ -887,6 +927,56 @@ mod tests {
         assert!(sound.overlaps(&patch) && patch.overlaps(&sound)); // through the base/ layer
         assert!(!sound.overlaps(&other)); // manifest and icon do not count
         assert!(!other.overlaps(&mk(&[])));
+    }
+
+    #[test]
+    fn own_files_tell_a_patch_from_a_mod_replacing_the_same_game_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = GamePaths::build(
+            ["def/vehicle/truck/stock/engine.sii", "automat/aa/1.mat"].into_iter(),
+            "sig",
+            &tmp.path().join("paths.bin"),
+        )
+        .unwrap();
+        let mk = |files: &[&str], game: Option<&GamePaths>| {
+            let files: Vec<String> = files.iter().map(|s| s.to_string()).collect();
+            let facts = listing_facts(&files, None, &[], None, game);
+            let mut m = ScannedMod::failed(Path::new("x.scs"), ScsFormat::Zip, "");
+            (m.file_hashes, m.own_hashes) = (facts.file_hashes, facts.own_hashes);
+            m
+        };
+        let truck_files =
+            ["def/vehicle/truck/new/data.sii", "def/vehicle/truck/stock/engine.sii", "automat/bb/2.mat"];
+        let truck = mk(&truck_files, Some(&game));
+        // only the truck's own definition is a file it brings
+        assert_eq!(truck.own_hashes.as_ref(), [city_hash64(b"def/vehicle/truck/new/data.sii")]);
+
+        // a patch replaces a file that exists only because of the truck
+        let patch = mk(&["base/def/vehicle/truck/new/data.sii"], Some(&game));
+        assert!(patch.shares_own_files(&truck) && truck.shares_own_files(&patch));
+        // an engine tweak replaces the same file of the game: a conflict
+        // to order, but neither needs the other (however it spells the path)
+        let tweak = mk(&["Def/Vehicle/truck/stock/engine.sii", "def/vehicle/truck/stock/engine.sii"], Some(&game));
+        assert!(tweak.overlaps(&truck) && !tweak.shares_own_files(&truck));
+        assert!(tweak.own_hashes.is_empty());
+        // the same generated material in two models means nothing
+        let model = mk(&["automat/bb/2.mat", "model/thing.pmd"], Some(&game));
+        assert!(model.overlaps(&truck) && !model.shares_own_files(&truck));
+
+        // a locked archive: the game's paths still tell which nameless
+        // files are its own
+        let table = truck_files.iter().map(|p| city_hash64(p.as_bytes())).collect();
+        let locked = listing_facts(&[], Some(table), &[], None, Some(&game));
+        assert_eq!(locked.own_hashes.len(), 2, "its definition and the material it cannot name");
+        assert_eq!(locked.file_hashes.len(), 3);
+
+        // without the game's paths any shared file counts, generated ones aside
+        let (truck, tweak, model) = (
+            mk(&truck_files, None),
+            mk(&["def/vehicle/truck/stock/engine.sii"], None),
+            mk(&["automat/bb/2.mat", "model/thing.pmd"], None),
+        );
+        assert!(tweak.shares_own_files(&truck) && !model.shares_own_files(&truck));
     }
 
     #[test]

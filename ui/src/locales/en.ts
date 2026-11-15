@@ -134,7 +134,7 @@ export const en: Messages = {
   "order.conflicts": "Conflicts",
   "order.autoSort": "Auto sort",
   "order.revert": "Revert",
-  "order.hint": "Higher in the list means loaded later, with higher priority. Drag a row or press Alt+↑/↓ to move it; click rows (Ctrl or Shift for several) to select them for copying.",
+  "order.hint": "Higher in the list means loaded later, with higher priority. Drag a row or press Alt+↑/↓ to move it; click rows (Ctrl or Shift for several) to select them for copying. Selecting a mod marks its patches and the mod it was made for.",
   "order.active": "{n} active",
   "order.misplaced": " · {n} outside their group",
   "order.held": " · {n} kept in place",
@@ -172,6 +172,24 @@ export const en: Messages = {
   "conflict.full": "Fully overridden",
   "conflict.partial": "Partly overridden",
   "conflict.frequent": "Commonly shared files",
+
+  // ---- related mods: a mod and the patches and add-ons made for it
+  "rel.patch": "Patch",
+  "rel.patchTitle":
+    "Overwrites files that only the selected mod brings. It looks like a patch or add-on made for the selected mod.",
+  "rel.base": "Base",
+  "rel.baseTitle":
+    "The selected mod overwrites files that only this mod brings. It looks like the mod the selected one was made for.",
+  "rel.both": "Patch · Base",
+  "rel.bothTitle": "A patch for one of the selected mods and the base of another.",
+  "remove.title": "Deactivate '{name}'",
+  "remove.body":
+    "Active mods that overwrite files only this mod brings: {n}. They look like patches or add-ons made for it and may not work properly without it.",
+  "remove.note":
+    "This is worked out from the files and can be wrong. It includes mods connected through another one, like a patch of a patch. Until you save, Revert brings everything back.",
+  "remove.all": "Deactivate them too",
+  "remove.only": "Only this mod",
+  "remove.doneAll": "Deactivated '{name}' together with {n} of its patches and add-ons.",
 
   // ---- status line
   "status.scanning": "Scanning mods…",
