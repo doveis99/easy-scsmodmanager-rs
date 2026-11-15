@@ -130,6 +130,7 @@ export const ko = {
   "order.title": "로드 순서",
   "order.share": "공유",
   "order.conflicts": "충돌 보기",
+  "order.worldmap": "월드맵",
   "order.autoSort": "자동 정렬",
   "order.revert": "되돌리기",
   "order.hint": "위쪽일수록 나중에 로드되어 우선순위가 높습니다. 끌거나 Alt+↑/↓로 순서를 바꾸고, 클릭(Ctrl·Shift로 여러 개)으로 골라 복사할 수 있습니다. 모드를 고르면 그 모드의 패치와 베이스가 함께 표시됩니다.",
@@ -137,6 +138,9 @@ export const ko = {
   "order.misplaced": " · 그룹에 맞지 않는 모드 {n}개",
   "order.held": " · 순서 유지 {n}개",
   "order.overridden": " · 덮어써지는 모드 {n}개",
+  "order.lacking": " · 필요한 모드가 빠진 모드 {n}개",
+  "order.worldmapOff": " · 월드맵 배경 어긋남",
+  "order.worldmapOutside": " · 월드맵 배경 밖의 맵 {n}개",
   "order.incompatible": " · 버전 불일치 {n}개",
   "placement.belongs": "분류상 '{group}' 그룹에 속합니다.",
   "placement.andMore": " 외 {n}개",
@@ -179,6 +183,39 @@ export const ko = {
   "rel.baseTitle": "고른 모드가 이 모드에만 있는 파일을 덮어씁니다. 고른 모드의 바탕이 되는 모드로 보입니다.",
   "rel.both": "패치 · 베이스",
   "rel.bothTitle": "고른 모드 중 하나에는 패치이고, 다른 하나에는 베이스입니다.",
+
+  // ---- missing requirements: files a mod names that no active mod brings
+  "badge.needs": "필요한 모드 빠짐",
+  "needs.title": "이 모드의 정의 파일이 가리키는 파일 중 일부를 활성 모드 어디에서도 찾을 수 없습니다.",
+  "needs.inactive": "설치되어 있지만 활성 목록에 없는 모드 {n}개에 그 파일이 있습니다:",
+  "needs.inactiveItem": "  {name} — 파일 {n}개",
+  "needs.absent": "설치된 어느 모드에도 없는 파일 {n}개 (이 모드가 가리키는 파일 {total}개 중):",
+  "needs.folders": "  어디에도 없는 폴더: {folders}",
+  "needs.note":
+    "파일 이름으로 추정한 것이라 실제와 다를 수 있습니다. 큰 모드에는 쓰이지 않는 참조가 조금씩 남아 있어서, 빠진 파일이 충분히 많을 때만 알립니다. 맵의 정의(def) 패키지처럼 경로 없이 이름으로만 참조되는 모드는 빠져도 알 수 없습니다.",
+  "needs.activate": "빠진 모드 {n}개 활성화",
+  "needs.activated": "모드 {n}개를 활성 목록 맨 위에 추가했습니다. 순서를 확인하세요.",
+
+  // ---- world map: the map picture and where it lies
+  "worldmap.title": "월드맵",
+  "worldmap.game": "게임 기본값",
+  "worldmap.coords": "중심 ({x}, {z}) · 배경 크기 {w} × {h} km",
+  "worldmap.mismatch":
+    "⚠ 배경 이미지와 지도 좌표가 맞지 않습니다. 도로와 도시가 배경의 엉뚱한 자리에 그려집니다.",
+  "worldmap.drawnFor": "  배경이 만들어진 기준: {coords} (근거: {name}의 def/map_data.sii)",
+  "worldmap.fix":
+    "  이 좌표를 가진 활성 모드: {names}\n  그중 하나를 def/map_data.sii가 있는 모드들 가운데 가장 위에 두면 맞습니다.",
+  "worldmap.fixNone": "  이 좌표를 가진 모드가 활성 목록에 없습니다.",
+  "worldmap.fits": "배경 이미지와 지도 좌표가 서로 맞습니다.",
+  "worldmap.unknown": "배경 이미지가 어떤 좌표를 기준으로 만들어졌는지 알 수 없어 맞는지 비교하지 못했습니다.",
+  "worldmap.data": "지도 좌표 (def/map_data.sii): {name}",
+  "worldmap.unread": "  좌표를 읽지 못했습니다.",
+  "worldmap.overridden": "  같은 파일이 있지만 아래에 있어 적용되지 않는 활성 모드: {names}",
+  "worldmap.background": "배경 이미지 (material/ui/map): {name}",
+  "worldmap.outside": "⚠ 배경 범위 밖에 섹터가 있는 맵 (그 지역은 월드맵에서 배경 없이 보입니다):",
+  "worldmap.outsideItem": "  {name} — 섹터 {total}개 중 {n}개",
+  "worldmap.note":
+    "좌표 파일은 로드 순서에서 가장 위에 있는 것 하나만 적용됩니다. 배경이 어떤 좌표에 맞춰 만들어졌는지는 같은 팩의 좌표 파일로 추정한 것이고, 배경이 덮는 범위는 1:{scale} 축척으로 계산한 것이라 실제와 다를 수 있습니다.",
   "remove.title": "'{name}' 비활성화",
   "remove.body":
     "활성 모드 {n}개가 이 모드에만 있는 파일을 덮어씁니다. 이 모드를 고치거나 확장하는 패치·애드온으로 보이며, 이 모드 없이는 제대로 동작하지 않을 수 있습니다.",

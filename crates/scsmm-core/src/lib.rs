@@ -21,6 +21,7 @@ pub mod presets;
 pub mod profile;
 pub mod recover;
 pub mod relations;
+pub mod requires;
 pub mod scanner;
 pub mod scs;
 pub mod settings;
@@ -30,6 +31,7 @@ pub mod steam;
 pub mod update;
 pub mod workshop;
 pub mod workshop_api;
+pub mod worldmap;
 
 use std::io;
 

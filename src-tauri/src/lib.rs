@@ -4,7 +4,7 @@
 //! last scan in memory, shapes data for the UI and persists the user's
 //! choices (settings, category pins, favourites).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +26,8 @@ use scsmm_core::manifest::sniff_image_mime;
 use scsmm_core::presets::{default_presets_path, Preset, PresetError, PresetStore};
 use scsmm_core::profile::{self, ActiveMod};
 use scsmm_core::relations;
+use scsmm_core::requires::Requirements;
+use scsmm_core::worldmap::{self, MapData};
 use scsmm_core::scanner::{self, ScannedMod};
 use scsmm_core::extract::{extract_scs_with, ExtractOptions, ExtractResult};
 use scsmm_core::gamepaths::GamePaths;
@@ -74,8 +76,13 @@ type PerGame<T> = HashMap<String, T>;
 struct Inner {
     /// Last scan per game.
     scans: HashMap<Game, Vec<ScannedMod>>,
+    /// Who brings the files the scanned mods need. Worked out from the
+    /// scan when first asked for; dropped whenever the scan changes.
+    requirements: HashMap<Game, Requirements>,
     /// Game version read at the last scan, per game.
     versions: HashMap<Game, Option<String>>,
+    /// Where the game's own map picture lies, read at the last scan.
+    map_data: HashMap<Game, Option<MapData>>,
     /// active name -> display name as the game wrote it into the profiles.
     profile_names: HashMap<Game, HashMap<String, String>>,
     /// mod name -> pinned category tokens, the main one first. Loaded
@@ -489,6 +496,8 @@ fn build_dtos(inner: &mut Inner, game: Game) -> Vec<ModDto> {
         workshop,
         settings,
         presets: _,
+        requirements: _,
+        map_data: _,
     } = &*inner;
     let (Some(mods), Some(workshop), Some(settings)) = (scans.get(&game), workshop.as_ref(), settings.as_ref())
     else {
@@ -723,6 +732,8 @@ fn remember_view(mut view: ViewSettings, state: State<'_, AppState>) -> CmdResul
 struct ScanOutcome {
     mods: Vec<ScannedMod>,
     version: Option<String>,
+    /// Where the game's own map picture lies, where it could be read.
+    map_data: Option<MapData>,
     profile_names: HashMap<String, String>,
 }
 
@@ -751,6 +762,7 @@ fn scan_game(game: Game, settings: &Settings) -> CmdResult<ScanOutcome> {
     Ok(ScanOutcome {
         mods,
         version,
+        map_data: install_dir.as_deref().and_then(worldmap::game_map_data),
         profile_names,
     })
 }
@@ -794,7 +806,9 @@ fn scan_mods(game: String, state: State<'_, AppState>) -> CmdResult<Vec<ModDto>>
     };
     let mut inner = lock(&state)?;
     inner.scans.insert(game, outcome.mods);
+    inner.requirements.remove(&game);
     inner.versions.insert(game, outcome.version);
+    inner.map_data.insert(game, outcome.map_data);
     inner.profile_names.insert(game, outcome.profile_names);
     Ok(build_dtos(&mut inner, game))
 }
@@ -1009,6 +1023,7 @@ fn delete_mods(game: String, ids: Vec<String>, state: State<'_, AppState>) -> Cm
         if let Some(scanned) = inner.scans.get_mut(&game) {
             scanned.retain(|m| !result.deleted.contains(&m.mod_name()));
         }
+        inner.requirements.remove(&game);
     }
     Ok(result)
 }
@@ -1354,6 +1369,148 @@ fn mod_relations(
             (items[i].name.clone(), dto)
         })
         .collect())
+}
+
+/// An installed mod that is not active and has files an active one needs.
+#[derive(Serialize)]
+struct NeededMod {
+    /// The mod's id, as in the library.
+    id: String,
+    /// How many of the needed files it has.
+    files: usize,
+}
+
+/// Needed files that no installed mod has.
+#[derive(Serialize)]
+struct AbsentFiles {
+    files: usize,
+    /// Top-level folders nothing installed has, the fullest first.
+    folders: Vec<String>,
+    examples: Vec<String>,
+}
+
+/// What one active mod needs that the load order does not have.
+#[derive(Serialize)]
+struct MissingDto {
+    inactive: Vec<NeededMod>,
+    absent: Option<AbsentFiles>,
+    /// How many different files the mod's definitions name in all.
+    named: usize,
+}
+
+/// Which active mods name files that no active mod brings: a package of
+/// the same map left out of the load order, or one that is not installed.
+/// Keyed by active name; mods that miss nothing are left out.
+#[tauri::command]
+fn missing_requirements(
+    game: String,
+    items: Vec<ActiveMod>,
+    state: State<'_, AppState>,
+) -> CmdResult<HashMap<String, MissingDto>> {
+    let game = parse_game(&game)?;
+    let mut inner = lock(&state)?;
+    let Inner { scans, requirements, .. } = &mut *inner;
+    let empty = Vec::new();
+    let scanned = scans.get(&game).unwrap_or(&empty);
+    if !requirements.get(&game).is_some_and(|r| r.covers(scanned.len())) {
+        requirements.insert(game, Requirements::build(scanned));
+    }
+    let requirements = &requirements[&game];
+    let matcher = ActiveModMatcher::new(scanned);
+    let indices: Vec<Option<usize>> = items.iter().map(|a| matcher.lookup(a)).collect();
+    let active: HashSet<usize> = indices.iter().flatten().copied().collect();
+    Ok(items
+        .iter()
+        .zip(&indices)
+        .filter_map(|(item, index)| {
+            let missing = requirements.missing((*index)?, |i| active.contains(&i))?;
+            let dto = MissingDto {
+                inactive: missing
+                    .inactive
+                    .iter()
+                    .map(|p| NeededMod { id: scanned[p.index].mod_name(), files: p.files })
+                    .collect(),
+                absent: missing.absent.map(|a| AbsentFiles { files: a.files, folders: a.folders, examples: a.examples }),
+                named: missing.named,
+            };
+            Some((item.name.clone(), dto))
+        })
+        .collect())
+}
+
+/// An active mod with map sectors the map picture does not reach.
+#[derive(Serialize)]
+struct OutsideDto {
+    name: String,
+    sectors: usize,
+    total: usize,
+}
+
+/// The world map of a load order; names are active names.
+#[derive(Serialize)]
+struct WorldMapDto {
+    /// The mod whose `def/map_data.sii` applies; null for the game's own.
+    data_from: Option<String>,
+    /// The placement of the map picture in effect, where it could be read.
+    data: Option<MapData>,
+    /// Active mods below that have the file too, to no effect.
+    data_overridden: Vec<String>,
+    /// The mod whose map picture is shown; null for the game's own.
+    background_from: Option<String>,
+    background_overridden: Vec<String>,
+    /// The placement that picture was made for, where something tells.
+    drawn_for: Option<MapData>,
+    /// Library id of the mod whose `map_data.sii` tells that; null (with
+    /// `drawn_for` set) when it is the game's own picture.
+    told_by: Option<String>,
+    /// The placement in effect is not the one the picture was made for.
+    mismatch: bool,
+    /// Active mods whose `map_data.sii` has the placement the picture was
+    /// made for.
+    matching: Vec<String>,
+    outside: Vec<OutsideDto>,
+    /// Real metres per world unit, which the reach of the picture is
+    /// worked out with.
+    scale: f64,
+    problem: bool,
+}
+
+/// Whether the map picture and its placement fit together in this load
+/// order (display order, top first), and whether the maps lie within the
+/// picture. Null when no active mod has to do with the world map.
+#[tauri::command]
+fn world_map(game: String, items: Vec<ActiveMod>, state: State<'_, AppState>) -> CmdResult<Option<WorldMapDto>> {
+    let game = parse_game(&game)?;
+    let inner = lock(&state)?;
+    let empty = Vec::new();
+    let scanned = inner.scans.get(&game).unwrap_or(&empty);
+    let matcher = ActiveModMatcher::new(scanned);
+    let active: Vec<Option<usize>> = items.iter().map(|a| matcher.lookup(a)).collect();
+    let scale = worldmap::world_scale(game);
+    let own = inner.map_data.get(&game).copied().flatten();
+    let Some(report) = worldmap::analyze(scanned, &active, own, scale) else {
+        return Ok(None);
+    };
+    let name = |position: usize| items[position].name.clone();
+    let names = |positions: &[usize]| positions.iter().map(|&p| name(p)).collect();
+    Ok(Some(WorldMapDto {
+        data_from: report.data_from.map(name),
+        data: report.data,
+        data_overridden: names(&report.data_overridden),
+        background_from: report.background_from.map(name),
+        background_overridden: names(&report.background_overridden),
+        drawn_for: report.drawn_for.as_ref().map(|d| d.data),
+        told_by: report.drawn_for.as_ref().and_then(|d| d.told_by).map(|index| scanned[index].mod_name()),
+        mismatch: report.mismatch,
+        matching: names(&report.matching),
+        outside: report
+            .outside
+            .iter()
+            .map(|o| OutsideDto { name: name(o.position), sectors: o.sectors, total: o.total })
+            .collect(),
+        scale,
+        problem: report.has_problem(),
+    }))
 }
 
 /// Group headers and misplacement flags for tokens in display order.
@@ -1816,6 +1973,8 @@ pub fn run() {
             resolve_items,
             analyze_conflicts,
             mod_relations,
+            missing_requirements,
+            world_map,
             layout_rows,
             sort_plan,
             save_load_order,

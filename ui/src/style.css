@@ -423,6 +423,22 @@ input[type="search"] {
   border-color: color-mix(in srgb, var(--warn) 50%, var(--line));
 }
 
+/* a button whose report has something to look at */
+.btn.attention {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--line));
+}
+
+/* a badge that opens the details behind it */
+button.badge.action {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+button.badge.action:hover {
+  background: var(--bg);
+}
+
 .badge.keep {
   color: var(--muted);
   cursor: help;

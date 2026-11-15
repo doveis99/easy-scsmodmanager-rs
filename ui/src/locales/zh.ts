@@ -131,6 +131,7 @@ export const zh: Messages = {
   "order.title": "加载顺序",
   "order.share": "分享",
   "order.conflicts": "查看冲突",
+  "order.worldmap": "世界地图",
   "order.autoSort": "自动排序",
   "order.revert": "还原",
   "order.hint": "越靠上的模组越晚加载，优先级越高。可以拖动，或按 Alt+↑/↓ 调整顺序。点击（按住 Ctrl 或 Shift 可多选）选中模组后可以复制，同时会标出它的补丁和基础模组。",
@@ -138,6 +139,9 @@ export const zh: Messages = {
   "order.misplaced": " · {n} 个不在所属分组",
   "order.held": " · {n} 个保持顺序",
   "order.overridden": " · {n} 个被覆盖",
+  "order.lacking": " · {n} 个缺少所需模组",
+  "order.worldmapOff": " · 世界地图背景错位",
+  "order.worldmapOutside": " · {n} 个地图超出世界地图背景",
   "order.incompatible": " · {n} 个版本不符",
   "placement.belongs": "按分类，这个模组属于“{group}”分组。",
   "placement.andMore": " 等另外 {n} 个",
@@ -177,6 +181,38 @@ export const zh: Messages = {
   "rel.baseTitle": "所选模组覆盖了只有这个模组才有的文件，看起来它是所选模组的基础模组。",
   "rel.both": "补丁 · 基础",
   "rel.bothTitle": "它是所选模组中某一个的补丁，同时又是另一个的基础。",
+
+  // ---- missing requirements: files a mod names that no active mod brings
+  "badge.needs": "缺少所需模组",
+  "needs.title": "这个模组的定义文件指向的部分文件，在已启用的模组中都找不到。",
+  "needs.inactive": "有 {n} 个已安装但未启用的模组包含这些文件：",
+  "needs.inactiveItem": "  {name} — {n} 个文件",
+  "needs.absent": "有 {n} 个文件在任何已安装的模组中都没有（这个模组共指向 {total} 个文件）：",
+  "needs.folders": "  哪里都没有的文件夹：{folders}",
+  "needs.note":
+    "这是根据文件名推测的，可能与实际不符。较大的模组总会留下一些无人使用的引用，所以只有缺失的文件足够多时才会提示。像地图的定义（def）包那样只按名称而不按路径被引用的模组，即使缺少也无法发现。",
+  "needs.activate": "启用缺少的 {n} 个模组",
+  "needs.activated": "已把 {n} 个模组加到加载顺序的最上方，请确认它们的位置。",
+
+  // ---- world map: the map picture and where it lies
+  "worldmap.title": "世界地图",
+  "worldmap.game": "游戏默认",
+  "worldmap.coords": "中心 ({x}, {z}) · 背景大小 {w} × {h} km",
+  "worldmap.mismatch": "⚠ 背景图片与地图坐标不匹配，道路和城市会画在背景上错误的位置。",
+  "worldmap.drawnFor": "  背景图片所依据的坐标：{coords}（依据：{name} 的 def/map_data.sii）",
+  "worldmap.fix":
+    "  具有这组坐标的已启用模组：{names}\n  把其中一个放到所有带 def/map_data.sii 的模组的最上方即可。",
+  "worldmap.fixNone": "  已启用的模组中没有这组坐标。",
+  "worldmap.fits": "背景图片与地图坐标相互匹配。",
+  "worldmap.unknown": "无法得知背景图片是按哪组坐标制作的，因此没有进行比较。",
+  "worldmap.data": "地图坐标 (def/map_data.sii)：{name}",
+  "worldmap.unread": "  无法读取坐标。",
+  "worldmap.overridden": "  同样带有该文件但位置靠下、未生效的已启用模组：{names}",
+  "worldmap.background": "背景图片 (material/ui/map)：{name}",
+  "worldmap.outside": "⚠ 有区块超出背景范围的地图（这些区域在世界地图上没有背景）：",
+  "worldmap.outsideItem": "  {name} — {total} 个区块中的 {n} 个",
+  "worldmap.note":
+    "坐标文件只有加载顺序中最靠上的一个生效。背景图片所依据的坐标是根据同一套地图包里的坐标文件推测的，背景覆盖的范围按 1:{scale} 的比例计算，都可能与实际不符。",
   "remove.title": "停用“{name}”",
   "remove.body":
     "有 {n} 个已启用的模组覆盖了只有这个模组才有的文件。它们看起来是为这个模组制作的补丁或附加模组，没有它可能无法正常工作。",

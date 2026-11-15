@@ -28,8 +28,10 @@ use crate::scs::cityhash::city_hash64;
 use crate::scs::dir::DirSource;
 use crate::scs::hashfs::HashFsReader;
 use crate::scs::zip::{is_zipfile, RawZipSource, ZipSource};
+use crate::sii::crypto::sii_bytes_to_text;
 use crate::scs::{detect_format, ModSource, ScsFormat};
 use crate::workshop::{resolve_workshop_payload, ARCHIVE_SUFFIXES};
+use crate::worldmap::{self, MapFacts};
 use crate::Error;
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +69,26 @@ pub struct ScannedMod {
     /// How many of the hidden files could be named after all (they share
     /// a path with a file of the game or of another mod).
     pub hidden_named: usize,
+    /// Fingerprint of every file the mod can hand to another one: like
+    /// `file_hashes`, with the paths in lower case, the way definitions
+    /// spell them when they point at a file.
+    #[serde(skip)]
+    pub provides: Arc<[u64]>,
+    /// Top-level folders of the listed files, in lower case.
+    #[serde(skip)]
+    pub top_dirs: Vec<String>,
+    /// The files this mod needs someone else to bring: every path its
+    /// definitions and materials name that is neither one of its own files
+    /// nor one of the game's. Lower case, sorted. Empty without the game's
+    /// path list - then nothing tells a missing file from a game file.
+    #[serde(skip)]
+    pub wants: Arc<[String]>,
+    /// How many different paths the definitions and materials name in all.
+    pub named_paths: usize,
+    /// What the mod has to do with the world map: the placement of the
+    /// map picture, the picture itself, the sectors of its map.
+    #[serde(skip)]
+    pub world_map: MapFacts,
     /// When the payload landed on this filesystem (seconds since the Unix
     /// epoch; creation time where available). 0 when unreadable.
     pub installed_at: f64,
@@ -154,6 +176,11 @@ impl ScannedMod {
             own_hashes: Arc::from([]),
             hidden: Arc::from([]),
             hidden_named: 0,
+            provides: Arc::from([]),
+            top_dirs: Vec::new(),
+            wants: Arc::from([]),
+            named_paths: 0,
+            world_map: MapFacts::default(),
             installed_at: 0.0,
             icon: None,
             evidence: Evidence::default(),
@@ -220,6 +247,7 @@ fn scan_paths(
     let ctx = ScanContext { owned_dlc, game: game_paths.as_deref() };
     let mut mods: Vec<ScannedMod> = paths.par_iter().map(|p| scan_with(p, ctx)).collect();
     name_hidden_files(&mut mods, game_paths);
+    worldmap::find_hidden_sectors(&mut mods);
     mods
 }
 
@@ -375,6 +403,8 @@ struct ListingFacts {
     file_hashes: Arc<[u64]>,
     own_hashes: Arc<[u64]>,
     hidden: Arc<[u64]>,
+    provides: Arc<[u64]>,
+    top_dirs: Vec<String>,
 }
 
 /// Materials the exporter generates and names by their content: the same
@@ -432,11 +462,21 @@ fn listing_facts(
     // the ones among them that the game does not have (it spells its
     // paths in lower case)
     let mut own: Vec<u64> = Vec::new();
+    // the same files as another mod's definitions would name them
+    let mut provides: Vec<u64> = Vec::new();
+    let mut top_dirs: BTreeSet<String> = BTreeSet::new();
     for path in normalized.iter().filter(|p| p.contains('/') && !p.ends_with('/')) {
         let hash = city_hash64(path.as_bytes());
         hashes.push(hash);
         let lower = path.to_ascii_lowercase();
-        if !lower.starts_with(GENERATED_PREFIX) && game.is_none_or(|g| !g.contains(city_hash64(lower.as_bytes()))) {
+        let lower_hash = city_hash64(lower.as_bytes());
+        provides.push(lower_hash);
+        if let Some((top, _)) = lower.split_once('/') {
+            if !top_dirs.contains(top) {
+                top_dirs.insert(top.to_string());
+            }
+        }
+        if !lower.starts_with(GENERATED_PREFIX) && game.is_none_or(|g| !g.contains(lower_hash)) {
             own.push(hash);
         }
     }
@@ -466,19 +506,132 @@ fn listing_facts(
                 }
             }
             hashes.push(hash);
+            provides.push(hash);
         }
     }
-    for list in [&mut hashes, &mut own, &mut hidden] {
+    for list in [&mut hashes, &mut own, &mut hidden, &mut provides] {
         list.sort_unstable();
         list.dedup();
     }
+    let file_hashes: Arc<[u64]> = Arc::from(hashes);
+    // nearly every mod spells its paths in lower case: one list for both
+    let provides = if provides[..] == file_hashes[..] { Arc::clone(&file_hashes) } else { Arc::from(provides) };
     ListingFacts {
         is_map,
         def_files,
-        file_hashes: Arc::from(hashes),
+        file_hashes,
         own_hashes: Arc::from(own),
         hidden: Arc::from(hidden),
+        provides,
+        top_dirs: top_dirs.into_iter().collect(),
     }
+}
+
+/// Nothing a definition or material file should be is larger.
+const MAX_REFERENCE_BYTES: usize = 8 * 1024 * 1024;
+
+/// The quoted strings of a definition or material file that name a file.
+///
+/// A path with a leading slash counts from the root. One without is taken
+/// to sit next to the file that names it where that is how the format
+/// works: an `@include` in a definition, a texture in a material.
+fn named_paths(text: &str, dir: &str, is_material: bool, out: &mut HashSet<String>) {
+    for line in text.lines() {
+        if !line.contains('"') {
+            continue;
+        }
+        let is_include = line.trim_start().starts_with("@include");
+        for part in line.split('"').skip(1).step_by(2) {
+            if part.len() < 5 || part.len() > 260 {
+                continue;
+            }
+            // templates and the like: "<base_name>.<id>.sii", "a|b"
+            if part.bytes().any(|b| matches!(b, b'<' | b'>' | b'|' | b':' | b'*' | b'?') || b < 0x20) {
+                continue;
+            }
+            let Some((_, ext)) = part.rsplit_once('.') else { continue };
+            if ext.is_empty() || ext.len() > 5 || !ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                continue;
+            }
+            let part = part.replace('\\', "/").to_ascii_lowercase();
+            let resolved = if part.starts_with('/') {
+                resolve_path("", &part).filter(|path| path.contains('/'))
+            } else if (is_include || (is_material && ext.eq_ignore_ascii_case("tobj"))) && !part.contains(' ') {
+                // a shader name ("eut2.dif.spec") has a dot too: only what
+                // the format looks up beside the file counts
+                resolve_path(dir, &part)
+            } else {
+                None
+            };
+            out.extend(resolved);
+        }
+    }
+}
+
+/// `path` as seen from the folder `dir`, without empty, `.` and `..`
+/// segments. `None` when it climbs out of the root.
+fn resolve_path(dir: &str, path: &str) -> Option<String> {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in dir.split('/').chain(path.split('/')) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            other => segments.push(other),
+        }
+    }
+    Some(segments.join("/"))
+}
+
+/// The files a mod points at without having them (see `ScannedMod::wants`)
+/// and how many paths it names in all. `files` is the listing as the
+/// source spells it. Needs the game's paths: without them every reference
+/// to a file of the game would look like one to a missing file.
+fn gather_wants(
+    source: &mut dyn ModSource,
+    files: &[String],
+    provides: &[u64],
+    ctx: ScanContext,
+) -> (Arc<[String]>, usize) {
+    let Some(game) = ctx.game else {
+        return (Arc::from([]), 0);
+    };
+    let mut named: HashSet<String> = HashSet::new();
+    for file in files {
+        let path = strip_dlc_prefix(strip_base_prefix(file), ctx.owned_dlc).to_ascii_lowercase();
+        let is_material = path.ends_with(".mat");
+        let is_definition = path.starts_with("def/") && (path.ends_with(".sii") || path.ends_with(".sui"));
+        if !is_material && !is_definition {
+            continue;
+        }
+        let Ok(data) = source.read_bytes(file) else {
+            continue;
+        };
+        if data.len() > MAX_REFERENCE_BYTES {
+            continue;
+        }
+        let text = if is_material {
+            String::from_utf8_lossy(&data).into_owned()
+        } else {
+            match sii_bytes_to_text(&data, false) {
+                Ok(text) => text,
+                Err(_) => continue,
+            }
+        };
+        let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+        named_paths(&text, dir, is_material, &mut named);
+    }
+    let total = named.len();
+    let mut wants: Vec<String> = named
+        .into_iter()
+        .filter(|path| {
+            let hash = city_hash64(path.as_bytes());
+            provides.binary_search(&hash).is_err() && !game.contains(hash)
+        })
+        .collect();
+    wants.sort_unstable();
+    (Arc::from(wants), total)
 }
 
 /// Files of one path label whose content is looked into.
@@ -533,6 +686,39 @@ fn gather_evidence(source: &mut dyn ModSource, files: &[String], hidden: &[u64],
     builder.finish()
 }
 
+/// What the mod brings for the world map (see [`MapFacts`]). `files` is
+/// the listing as the source spells it, `provides` the fingerprint of all
+/// its files, the unlisted ones of a locked archive among them.
+fn gather_world_map(source: &mut dyn ModSource, files: &[String], provides: &[u64], ctx: ScanContext) -> MapFacts {
+    let mut facts = MapFacts::default();
+    let mut data_file: Option<&str> = None;
+    let mut sectors: BTreeSet<(i16, i16)> = BTreeSet::new();
+    let mut maps: BTreeSet<String> = BTreeSet::new();
+    for file in files {
+        let path = strip_dlc_prefix(strip_base_prefix(file), ctx.owned_dlc).to_ascii_lowercase();
+        if path == worldmap::DATA_FILE {
+            data_file = Some(file);
+        } else if let Some((map, x, z)) = worldmap::sector_of(&path) {
+            sectors.insert((x, z));
+            if !maps.contains(map) {
+                maps.insert(map.to_string());
+            }
+        }
+    }
+    // a locked archive holds the file without listing it
+    let data_file = data_file.or_else(|| source.has(worldmap::DATA_FILE).then_some(worldmap::DATA_FILE));
+    if let Some(path) = data_file {
+        facts.has_data = true;
+        facts.data = worldmap::read_map_data(source, path);
+    }
+    facts.background = worldmap::BACKGROUND_FILES
+        .iter()
+        .any(|file| provides.binary_search(&city_hash64(file.as_bytes())).is_ok());
+    facts.sectors = sectors.into_iter().collect();
+    facts.maps = maps.into_iter().collect();
+    facts
+}
+
 fn from_bundle(
     path: &Path,
     format: ScsFormat,
@@ -544,6 +730,8 @@ fn from_bundle(
     let files = source.list_files();
     let facts = listing_facts(&files, source.path_hashes(), &root_names, ctx.owned_dlc, ctx.game);
     let evidence = gather_evidence(source, &files, &facts.hidden, ctx);
+    let (wants, named_paths) = gather_wants(source, &files, &facts.provides, ctx);
+    let world_map = gather_world_map(source, &files, &facts.provides, ctx);
     ScannedMod {
         path: path.to_path_buf(),
         format,
@@ -556,6 +744,11 @@ fn from_bundle(
         own_hashes: facts.own_hashes,
         hidden: facts.hidden,
         hidden_named: 0,
+        provides: facts.provides,
+        top_dirs: facts.top_dirs,
+        wants,
+        named_paths,
+        world_map,
         installed_at: 0.0,
         icon: bundle.icon,
         evidence,
@@ -977,6 +1170,121 @@ mod tests {
             mk(&["automat/bb/2.mat", "model/thing.pmd"], None),
         );
         assert!(tweak.shares_own_files(&truck) && !model.shares_own_files(&truck));
+    }
+
+    #[test]
+    fn the_files_a_mod_names_without_having_them_are_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mod_dir = tmp.path().join("mod");
+        fs::create_dir_all(&mod_dir).unwrap();
+        let world: &[u8] = br#"SiiNunit
+{
+@include "sub/part.sui"
+@include "sub/gone.sui"
+model_def : model.a {
+	model_desc: "/model/pack/house.pmd"	# another mod's
+	look: "/model/Own/Shed.PMD"
+	icon: "volvo_fh"
+	template: "/def/world/<base_name>.<id>.sii"
+}
+prefab_model : prefab.b {
+	prefab_desc: "/prefab/cross/x.ppd"	# the game's
+	name: "not a file.txt"
+}
+}"#;
+        let material: &[u8] = br#"effect : "eut2.dif.spec" {
+	texture : "texture_base" {
+		source : "wall.tobj"
+	}
+	texture : "texture_over" {
+		source : "//material/shared/./dirt.tobj"
+	}
+	texture : "texture_mask" {
+		source : "../own/roof.tobj"
+	}
+	texture : "texture_none" {
+		source : "../../../outside.tobj"
+	}
+}"#;
+        make_zip(
+            &mod_dir.join("def.scs"),
+            &[
+                ("manifest.sii", MANIFEST),
+                ("def/world/model.pack.sii", world),
+                ("def/world/sub/part.sui", b"# nothing"),
+                ("model/own/shed.pmd", b"."),
+                ("model/own/wall.mat", material),
+                ("model/own/roof.mat", br#"material : "eut2.dif" { texture : "roof.tobj" }"#),
+                ("model/own/roof.tobj", b"."),
+            ],
+        );
+        let mut game = GamePaths::build(["prefab/cross/x.ppd"].into_iter(), "sig", &tmp.path().join("paths.bin")).unwrap();
+
+        let mods = scan_paths(&mod_candidates(&mod_dir), None, Some(&mut game));
+        let m = &mods[0];
+        assert_eq!(m.error, None);
+        // what it names besides its own files and the game's, lower case;
+        // names without a file ending, templates and shaders are no paths
+        assert_eq!(
+            m.wants.as_ref(),
+            ["def/world/sub/gone.sui", "material/shared/dirt.tobj", "model/own/wall.tobj", "model/pack/house.pmd"]
+        );
+        // those four, its own shed, include and roof texture, the game's prefab
+        assert_eq!(m.named_paths, 8);
+        assert_eq!(m.top_dirs, ["def", "model"]);
+        assert!(m.provides.binary_search(&city_hash64(b"model/own/shed.pmd")).is_ok());
+
+        // without the game's paths a file of the game cannot be told from
+        // a missing one: nothing is kept
+        let blind = scan_mod_directory(&mod_dir, None);
+        assert!(blind[0].wants.is_empty());
+        assert_eq!(blind[0].named_paths, 0);
+    }
+
+    #[test]
+    fn what_a_mod_brings_for_the_world_map_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mod_dir = tmp.path().join("mod");
+        fs::create_dir_all(&mod_dir).unwrap();
+        make_zip(
+            &mod_dir.join("a_def.scs"),
+            &[
+                ("manifest.sii", MANIFEST),
+                ("def/map_data.sii", b"map_data : .map.data {\n ui_map_center: (66700, -24700)\n ui_map_size: (8127, 7928)\n}"),
+                ("map/europe/sec+0010-0002.base", b"."),
+                ("map/europe/sec+0010-0002.aux", b"."),
+                ("Map/Europe/sec-0034+0021.base", b"."),
+                ("map/europe.mbd", b"."),
+            ],
+        );
+        make_zip(
+            &mod_dir.join("b_assets.scs"),
+            &[("manifest.sii", MANIFEST), ("material/ui/map/map0.dds", b"."), ("material/ui/map/road/a1.mat", b".")],
+        );
+        // a locked archive: values, picture and a sector, none of them listed
+        fs::write(
+            mod_dir.join("c_locked.scs"),
+            build_locked_v1(&[
+                ("manifest.sii", MANIFEST),
+                ("def/map_data.sii", b"ui_map_center: (1, 2)\nui_map_size: (3, 4)"),
+                ("material/ui/map/map.tobj", b"."),
+                ("map/europe/sec+0035-0004.base", b"."),
+            ]),
+        )
+        .unwrap();
+        make_zip(&mod_dir.join("d_truck.scs"), &[("manifest.sii", MANIFEST), ("def/vehicle/truck/x/data.sii", b".")]);
+
+        let mods = scan_mod_directory(&mod_dir, None);
+        let facts = |i: usize| &mods[i].world_map;
+        assert!(facts(0).has_data && !facts(0).background);
+        assert_eq!(facts(0).data.map(|d| (d.center, d.size_km)), Some(((66700.0, -24700.0), (8127.0, 7928.0))));
+        assert_eq!(facts(0).sectors, [(-34, 21), (10, -2)]);
+        assert_eq!(facts(0).maps, ["europe"]);
+        assert!(facts(1).background && !facts(1).has_data && facts(1).sectors.is_empty());
+        assert!(facts(2).has_data && facts(2).background);
+        assert_eq!(facts(2).data.map(|d| d.center), Some((1.0, 2.0)));
+        assert_eq!(facts(2).sectors, [(35, -4)]);
+        assert!(facts(3).is_empty());
     }
 
     #[test]

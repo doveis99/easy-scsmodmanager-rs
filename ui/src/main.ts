@@ -111,6 +111,48 @@ interface ModRelations {
   dependents: string[];
 }
 
+/** What an active mod needs that the load order does not have: files its
+ *  definitions name which no active mod brings. */
+interface MissingRequirements {
+  /** Installed mods that have such files and are not active, the one with
+   *  most of them first. */
+  inactive: { id: string; files: number }[];
+  /** Such files that no installed mod has. */
+  absent: { files: number; folders: string[]; examples: string[] } | null;
+  /** How many different files the mod's definitions name in all. */
+  named: number;
+}
+
+/** Where the map picture of the world map lies. */
+interface MapPlacement {
+  /** World position of its centre: x (east), z (south). */
+  center: [number, number];
+  /** The real size it stands for, in km: width, height. */
+  size_km: [number, number];
+}
+
+/** The world map of the load order: whose placement and whose picture
+ *  apply, and whether they fit. Names are active names. */
+interface WorldMap {
+  /** The mod whose `def/map_data.sii` applies; null for the game's own. */
+  data_from: string | null;
+  data: MapPlacement | null;
+  data_overridden: string[];
+  /** The mod whose map picture is shown; null for the game's own. */
+  background_from: string | null;
+  background_overridden: string[];
+  /** The placement that picture was made for, where something tells. */
+  drawn_for: MapPlacement | null;
+  /** Library id of the mod that tells; null for the game's own picture. */
+  told_by: string | null;
+  mismatch: boolean;
+  /** Active mods whose placement is the one the picture was made for. */
+  matching: string[];
+  outside: { name: string; sectors: number; total: number }[];
+  scale: number;
+  problem: boolean;
+}
+
 interface GameSettings {
   documents_dir: string | null;
   workshop_dir: string | null;
@@ -249,6 +291,11 @@ const state = {
   conflicts: { overrides: {}, frequent: {} } as ConflictReport,
   /** Patches and bases of the active mods that have any. */
   relations: {} as Record<string, ModRelations>,
+  /** What the active mods need that the list does not have, for those
+   *  that miss something. */
+  missing: {} as Record<string, MissingRequirements>,
+  /** The world map of the list; null while no active mod touches it. */
+  worldMap: null as WorldMap | null,
   plan: NO_PLAN,
   /** Presets of the current game. */
   presets: [] as Preset[],
@@ -307,6 +354,8 @@ async function loadGame(game: GameId) {
   state.layout = { rows: [], misplaced: 0 };
   state.conflicts = { overrides: {}, frequent: {} };
   state.relations = {};
+  state.missing = {};
+  state.worldMap = null;
   state.plan = NO_PLAN;
   state.presets = [];
   state.basePreset = null;
@@ -412,18 +461,147 @@ function activeEntries(items: ActiveItem[] = state.active) {
 /** Recompute group headers and conflicts for the current list and redraw. */
 async function relayout() {
   const epoch = state.epoch;
-  const [layout, conflicts, relations, plan] = await Promise.all([
+  const [layout, conflicts, relations, missing, worldMap, plan] = await Promise.all([
     invoke<Layout>("layout_rows", { tokens: state.active.map((a) => a.token) }),
     invoke<ConflictReport>("analyze_conflicts", { game: state.game, items: activeEntries() }),
     invoke<Record<string, ModRelations>>("mod_relations", { game: state.game, items: activeEntries() }),
+    invoke<Record<string, MissingRequirements>>("missing_requirements", { game: state.game, items: activeEntries() }),
+    invoke<WorldMap | null>("world_map", { game: state.game, items: activeEntries() }),
     invoke<SortPlan>("sort_plan", { game: state.game, items: activeEntries() }),
   ]);
   if (epoch !== state.epoch) return;
   state.layout = layout;
   state.conflicts = conflicts;
   state.relations = relations;
+  state.missing = missing;
+  state.worldMap = worldMap;
   state.plan = plan;
   renderAll();
+}
+
+// -------------------------------------------------------------- world map
+
+/** The world map of the load order as text: whose placement and picture
+ *  apply, whether they fit, and which maps reach beyond the picture. */
+function worldMapReport(): string {
+  const w = state.worldMap;
+  if (!w) return "";
+  const num = (v: number) => (Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100));
+  const coords = (d: MapPlacement) =>
+    t("worldmap.coords", { x: num(d.center[0]), z: num(d.center[1]), w: num(d.size_km[0]), h: num(d.size_km[1]) });
+  const names = (list: string[]) => list.map(displayNameOf).join(", ");
+  const game = t("worldmap.game");
+  const lines: string[] = [];
+  if (w.mismatch && w.drawn_for) {
+    lines.push(t("worldmap.mismatch"));
+    lines.push(
+      t("worldmap.drawnFor", { coords: coords(w.drawn_for), name: w.told_by ? libraryNameOf(w.told_by) : game }),
+    );
+    lines.push(w.matching.length ? t("worldmap.fix", { names: names(w.matching) }) : t("worldmap.fixNone"));
+  } else {
+    lines.push(w.drawn_for && w.data ? t("worldmap.fits") : t("worldmap.unknown"));
+  }
+  lines.push("");
+  lines.push(t("worldmap.data", { name: w.data_from ? displayNameOf(w.data_from) : game }));
+  lines.push(w.data ? `  ${coords(w.data)}` : t("worldmap.unread"));
+  if (w.data_overridden.length) lines.push(t("worldmap.overridden", { names: names(w.data_overridden) }));
+  lines.push("");
+  lines.push(t("worldmap.background", { name: w.background_from ? displayNameOf(w.background_from) : game }));
+  if (w.background_overridden.length) lines.push(t("worldmap.overridden", { names: names(w.background_overridden) }));
+  if (w.outside.length) {
+    lines.push("");
+    lines.push(t("worldmap.outside"));
+    for (const o of w.outside) {
+      lines.push(t("worldmap.outsideItem", { name: displayNameOf(o.name), n: o.sectors, total: o.total }));
+    }
+  }
+  lines.push("");
+  lines.push(t("worldmap.note", { scale: w.scale }));
+  return lines.join("\n");
+}
+
+// --------------------------------------------------- missing requirements
+
+/** What `name` misses, as text. `limit` caps each list (tooltips). */
+function missingLines(name: string, limit?: number): string[] {
+  const missing = state.missing[name];
+  if (!missing) return [];
+  const lines: string[] = [];
+  const capped = <T,>(list: T[]) => (limit === undefined ? list : list.slice(0, limit));
+  const more = (rest: number) => {
+    if (rest > 0) lines.push(t("common.more", { n: rest }));
+  };
+  if (missing.inactive.length) {
+    lines.push(t("needs.inactive", { n: missing.inactive.length }));
+    const shown = capped(missing.inactive);
+    for (const m of shown) lines.push(t("needs.inactiveItem", { name: libraryNameOf(m.id), n: m.files }));
+    more(missing.inactive.length - shown.length);
+  }
+  if (missing.absent) {
+    const { files, folders, examples } = missing.absent;
+    lines.push(t("needs.absent", { n: files, total: missing.named }));
+    if (folders.length) lines.push(t("needs.folders", { folders: folders.map((f) => `${f}/`).join(", ") }));
+    const shown = capped(examples);
+    for (const e of shown) lines.push(`  ${e}`);
+    more(files - shown.length);
+  }
+  return lines;
+}
+
+/** Name of an installed mod as the library shows it. */
+function libraryNameOf(id: string): string {
+  return state.mods.find((m) => m.id === id)?.display_name || id;
+}
+
+function missingBadge(item: ActiveItem): HTMLElement | null {
+  if (!state.missing[item.name]) return null;
+  return h(
+    "button",
+    {
+      class: "badge warn action",
+      title: [t("needs.title"), ...missingLines(item.name, 6)].join("\n"),
+      onclick: () => void showMissing(item),
+    },
+    t("badge.needs"),
+  );
+}
+
+/** Everything `item` misses, with the offer to activate what is installed. */
+async function showMissing(item: ActiveItem) {
+  const missing = state.missing[item.name];
+  if (!missing) return;
+  const active = activeNames();
+  const wanted = missing.inactive
+    .map((m) => state.mods.find((mod) => mod.id === m.id))
+    .filter((m): m is Mod => !!m && !active.has(m.id));
+  const body = h(
+    "div",
+    { class: "form" },
+    h("div", {}, t("needs.title")),
+    h("div", { class: "report" }, missingLines(item.name).join("\n")),
+    h("div", { class: "form-note" }, t("needs.note")),
+  );
+  const choice = await openDialog<"close" | "activate">({
+    title: item.display_name || item.name,
+    body,
+    dismiss: "close",
+    wide: true,
+    buttons: [
+      { label: t("common.close"), value: "close" },
+      ...(wanted.length
+        ? [{ label: t("needs.activate", { n: wanted.length }), value: "activate" as const, kind: "primary" as const }]
+        : []),
+    ],
+  });
+  if (choice !== "activate") return;
+  // on top of the list, where a new mod goes anyway, the one that brings
+  // most first; the layout says if that is the wrong group
+  for (const m of wanted.reverse()) {
+    if (activeNames().has(m.id)) continue;
+    state.active.unshift({ name: m.id, display_name: m.display_name, token: m.group_token, installed: true, compat: m.compat });
+  }
+  await relayout();
+  setStatus(t("needs.activated", { n: wanted.length }) + t("sort.saveNote"), "ok");
 }
 
 // ------------------------------------------------------------ conflicts
@@ -774,14 +952,20 @@ function renderOrder() {
 
   const overridden = Object.keys(state.conflicts.overrides).length;
   const incompatible = state.active.filter((a) => a.compat === "incompatible").length;
+  const lacking = state.active.filter((a) => state.missing[a.name]).length;
   $("order-summary").textContent =
     t("order.active", { n: state.active.length }) +
     (misplaced ? t("order.misplaced", { n: misplaced }) : "") +
     (heldCount ? t("order.held", { n: heldCount }) : "") +
     (overridden ? t("order.overridden", { n: overridden }) : "") +
+    (lacking ? t("order.lacking", { n: lacking }) : "") +
+    (state.worldMap?.mismatch ? t("order.worldmapOff") : "") +
+    (state.worldMap?.outside.length ? t("order.worldmapOutside", { n: state.worldMap.outside.length }) : "") +
     (incompatible ? t("order.incompatible", { n: incompatible }) : "");
   $("show-conflicts").hidden =
     overridden === 0 && Object.keys(state.conflicts.frequent).length === 0;
+  $("show-worldmap").hidden = !state.worldMap;
+  $("show-worldmap").classList.toggle("attention", !!state.worldMap?.problem);
   $<HTMLButtonElement>("auto-sort").disabled = state.plan.sorted;
   $<HTMLButtonElement>("revert").disabled = !dirty;
   $<HTMLButtonElement>("save").disabled = !dirty || !state.profilePath;
@@ -848,6 +1032,7 @@ function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLEle
     h("span", { class: "badge rel", hidden: true }),
     row.misplaced ? placementBadge(row, item) : null,
     item.installed ? null : h("span", { class: "badge err" }, t("badge.notInstalled")),
+    missingBadge(item),
     item.compat === "incompatible"
       ? h(
           "span",
@@ -2725,6 +2910,7 @@ function bindControls() {
   });
   $("auto-sort").addEventListener("click", () => void autoSort());
   $("show-conflicts").addEventListener("click", () => void infoModal(t("conflict.title"), conflictReport()));
+  $("show-worldmap").addEventListener("click", () => void infoModal(t("worldmap.title"), worldMapReport()));
   $("revert").addEventListener("click", () => void revert());
   $("save").addEventListener("click", () => void save());
 }

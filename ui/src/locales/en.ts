@@ -132,6 +132,7 @@ export const en: Messages = {
   "order.title": "Load order",
   "order.share": "Share",
   "order.conflicts": "Conflicts",
+  "order.worldmap": "World map",
   "order.autoSort": "Auto sort",
   "order.revert": "Revert",
   "order.hint": "Higher in the list means loaded later, with higher priority. Drag a row or press Alt+↑/↓ to move it; click rows (Ctrl or Shift for several) to select them for copying. Selecting a mod marks its patches and the mod it was made for.",
@@ -139,6 +140,9 @@ export const en: Messages = {
   "order.misplaced": " · {n} outside their group",
   "order.held": " · {n} kept in place",
   "order.overridden": " · {n} overridden",
+  "order.lacking": " · {n} missing a mod they need",
+  "order.worldmapOff": " · world map background misplaced",
+  "order.worldmapOutside": " · {n} maps beyond the world map background",
   "order.incompatible": " · {n} version mismatches",
   "placement.belongs": "By category this mod belongs to the '{group}' group.",
   "placement.andMore": " and {n} more",
@@ -182,6 +186,39 @@ export const en: Messages = {
     "The selected mod overwrites files that only this mod brings. It looks like the mod the selected one was made for.",
   "rel.both": "Patch · Base",
   "rel.bothTitle": "A patch for one of the selected mods and the base of another.",
+
+  // ---- missing requirements: files a mod names that no active mod brings
+  "badge.needs": "Needs a missing mod",
+  "needs.title": "Some of the files this mod's definitions point at are in none of the active mods.",
+  "needs.inactive": "{n} installed mods that are not in the load order have them:",
+  "needs.inactiveItem": "  {name} — {n} files",
+  "needs.absent": "{n} files that no installed mod has (of {total} files this mod points at):",
+  "needs.folders": "  Folders nothing has: {folders}",
+  "needs.note":
+    "This is worked out from file names and can be wrong. Larger mods always carry a few references nothing uses, so it only speaks up when enough files are missing. A mod that is referred to by name rather than by path, like a map's definition package, goes unnoticed when it is missing.",
+  "needs.activate": "Activate the {n} missing mods",
+  "needs.activated": "Added {n} mods at the top of the load order. Check where they belong.",
+
+  // ---- world map: the map picture and where it lies
+  "worldmap.title": "World map",
+  "worldmap.game": "the game's own",
+  "worldmap.coords": "centre ({x}, {z}) · background size {w} × {h} km",
+  "worldmap.mismatch":
+    "⚠ The background picture and the map coordinates do not belong together. Roads and cities are drawn in the wrong place on the background.",
+  "worldmap.drawnFor": "  The background was made for: {coords} (going by def/map_data.sii of {name})",
+  "worldmap.fix":
+    "  Active mods with these coordinates: {names}\n  Put one of them above every other mod that has a def/map_data.sii.",
+  "worldmap.fixNone": "  No active mod has these coordinates.",
+  "worldmap.fits": "The background picture and the map coordinates belong together.",
+  "worldmap.unknown": "Nothing tells which coordinates the background picture was made for, so they could not be compared.",
+  "worldmap.data": "Map coordinates (def/map_data.sii): {name}",
+  "worldmap.unread": "  The coordinates could not be read.",
+  "worldmap.overridden": "  Active mods below that have the file too, to no effect: {names}",
+  "worldmap.background": "Background picture (material/ui/map): {name}",
+  "worldmap.outside": "⚠ Maps with sectors beyond the background (those areas show without a background on the world map):",
+  "worldmap.outsideItem": "  {name} — {n} of {total} sectors",
+  "worldmap.note":
+    "Only the topmost coordinates file in the load order counts. Which coordinates the background was made for is taken from the coordinates file of the same pack, and the area it covers is worked out at a scale of 1:{scale}; both can be off.",
   "remove.title": "Deactivate '{name}'",
   "remove.body":
     "Active mods that overwrite files only this mod brings: {n}. They look like patches or add-ons made for it and may not work properly without it.",
