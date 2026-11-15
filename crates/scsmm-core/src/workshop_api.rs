@@ -357,11 +357,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut cache = WorkshopCache::open(tmp.path());
         let id = "978025490".to_string();
-        cache.store(&[id.clone()], parse_details(BODY).unwrap()).unwrap();
+        cache.store(std::slice::from_ref(&id), parse_details(BODY).unwrap()).unwrap();
         cache.write_preview(&id, JPEG).unwrap();
         let mut updated = parse_details(BODY).unwrap();
         updated.get_mut(&id).unwrap().preview_url = Some("https://images.example/new".into());
-        cache.store(&[id.clone()], updated).unwrap();
+        cache.store(std::slice::from_ref(&id), updated).unwrap();
         assert!(!cache.has_preview(&id));
     }
 }

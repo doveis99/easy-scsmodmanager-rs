@@ -69,7 +69,7 @@ pub struct Profile {
 /// SCS encodes the profile display name as hex(utf-8).
 pub fn decode_profile_dir_name(hex_name: &str) -> String {
     let decoded = (|| {
-        if hex_name.len() % 2 != 0 || !hex_name.is_ascii() {
+        if !hex_name.len().is_multiple_of(2) || !hex_name.is_ascii() {
             return None;
         }
         let bytes = (0..hex_name.len())

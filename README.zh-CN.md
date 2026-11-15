@@ -68,6 +68,7 @@ pnpm clean --all      # 删除整个 target 文件夹
 ```bash
 cargo run -p scsmm-cli -- installs
 cargo run -p scsmm-cli -- scan --game ets2
+cargo run -p scsmm-cli -- classify --game ets2
 cargo run -p scsmm-cli -- order --game ets2
 cargo run -p scsmm-cli -- extract <压缩包.scs> <空文件夹>
 ```

@@ -157,16 +157,10 @@ impl GamePaths {
         }
         let mut raw = vec![0u8; (count * 8) as usize];
         r.read_exact(&mut raw)?;
-        let hashes: Vec<u64> = raw
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().expect("8 bytes")))
-            .collect();
+        let hashes: Vec<u64> = raw.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
         let mut raw = vec![0u8; ((count + 1) * 4) as usize];
         r.read_exact(&mut raw)?;
-        let offsets: Vec<u32> = raw
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().expect("4 bytes")))
-            .collect();
+        let offsets: Vec<u32> = raw.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
         // a truncated or damaged file must not be trusted for lookups
         let sorted = hashes.windows(2).all(|w| w[0] < w[1]) && offsets.windows(2).all(|w| w[0] <= w[1]);
         let blob_len = offsets.last().copied().unwrap_or(0) as u64;

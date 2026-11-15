@@ -96,8 +96,8 @@ pub fn build_rows<S: AsRef<str>>(tokens: &[S]) -> Vec<Row> {
     for (index, token) in tokens.iter().enumerate() {
         let g = group_index_for_token(token.as_ref());
         if g >= current {
-            for gi in current + 1..=g {
-                rows.push(Row::Spacer { group_id: GROUPS[gi].id });
+            for group in &GROUPS[current + 1..=g] {
+                rows.push(Row::Spacer { group_id: group.id });
             }
             current = g;
         }

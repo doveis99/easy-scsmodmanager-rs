@@ -6,7 +6,7 @@
 //! raw-deflate: it scans the local file headers itself and inflates each
 //! entry directly.
 
-use std::collections::HashMap;
+use std::collections::hash_map::{Entry, HashMap};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -101,17 +101,14 @@ impl RawZipSource {
             };
             let key = String::from_utf8_lossy(name).into_owned();
             // first header wins; later duplicates are usually data descriptors
-            if !index.contains_key(&key) {
-                order.push(key.clone());
-                index.insert(
-                    key,
-                    RawEntry {
-                        data_offset: name_start + name_len + extra_len,
-                        comp_size: comp,
-                        uncomp_size: uncomp,
-                        method,
-                    },
-                );
+            if let Entry::Vacant(slot) = index.entry(key) {
+                order.push(slot.key().clone());
+                slot.insert(RawEntry {
+                    data_offset: name_start + name_len + extra_len,
+                    comp_size: comp,
+                    uncomp_size: uncomp,
+                    method,
+                });
             }
         }
         (index, order)

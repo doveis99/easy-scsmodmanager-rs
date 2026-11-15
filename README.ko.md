@@ -68,6 +68,7 @@ pnpm clean --all      # target 폴더 전체 삭제
 ```bash
 cargo run -p scsmm-cli -- installs
 cargo run -p scsmm-cli -- scan --game ets2
+cargo run -p scsmm-cli -- classify --game ets2
 cargo run -p scsmm-cli -- order --game ets2
 cargo run -p scsmm-cli -- extract <아카이브.scs> <빈 폴더>
 ```

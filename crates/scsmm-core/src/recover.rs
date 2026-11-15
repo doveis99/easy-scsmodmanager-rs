@@ -140,7 +140,7 @@ fn relative_guess(dir: &str, token: &str) -> Option<String> {
 pub fn recover_names(
     reader: &mut HashFsReader,
     listed: &[String],
-    mut dictionary: Option<&mut GamePaths>,
+    dictionary: Option<&mut GamePaths>,
     should_cancel: &dyn Fn() -> bool,
 ) -> Recovery {
     let entries = reader.file_entries();
@@ -161,7 +161,7 @@ pub fn recover_names(
     }
 
     // 1. paths of the game's own files
-    if let Some(dict) = dictionary.as_deref_mut() {
+    if let Some(dict) = dictionary {
         let mut hits: Vec<(u64, String)> = Vec::new();
         if reader.salt() == 0 {
             for hash in &unnamed {

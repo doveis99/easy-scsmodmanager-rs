@@ -68,6 +68,7 @@ The command-line tool shows scan results and the load order without touching a p
 ```bash
 cargo run -p scsmm-cli -- installs
 cargo run -p scsmm-cli -- scan --game ets2
+cargo run -p scsmm-cli -- classify --game ets2
 cargo run -p scsmm-cli -- order --game ets2
 cargo run -p scsmm-cli -- extract <archive.scs> <empty folder>
 ```

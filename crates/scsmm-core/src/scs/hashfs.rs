@@ -117,7 +117,7 @@ impl HashFsReader {
         let start_offset = u64_at(&header, 16);
         let table = read_at(file, start_offset, num_entries * 32)?;
         let mut entries = HashMap::with_capacity(num_entries);
-        for row in table.chunks_exact(32) {
+        for row in table.as_chunks::<32>().0 {
             let flags = u32_at(row, 16);
             entries.entry(u64_at(row, 0)).or_insert(Entry {
                 offset: u64_at(row, 8),
@@ -143,7 +143,7 @@ impl HashFsReader {
         let meta = inflate_zlib(&read_at(file, metadata_table_start, metadata_table_len)?)?;
 
         let mut entries = HashMap::with_capacity(entry_table.len() / 16);
-        for row in entry_table.chunks_exact(16) {
+        for row in entry_table.as_chunks::<16>().0 {
             let meta_index = u32_at(row, 8) as usize;
             let meta_count = u16_at(row, 12) as usize;
             if let Some(entry) = decode_v2_metadata(&meta, meta_index, meta_count) {
@@ -547,7 +547,8 @@ pub(crate) mod testutil {
         }
 
         // (hash, chunk type, tobj meta, stored bytes, real size, compressed)
-        let mut items: Vec<(u64, u8, Option<[u8; 12]>, Vec<u8>, u32, bool)> = Vec::new();
+        type Item = (u64, u8, Option<[u8; 12]>, Vec<u8>, u32, bool);
+        let mut items: Vec<Item> = Vec::new();
         for (path, content) in files {
             let hash = hash_path(path, salt);
             match content {
@@ -574,7 +575,7 @@ pub(crate) mod testutil {
         let mut entry_table = Vec::new();
         let mut meta_table: Vec<u8> = Vec::new();
         for (hash, chunk, tobj, stored, size, compressed) in &items {
-            while out.len() % super::V2_BLOCK_SIZE as usize != 0 {
+            while !out.len().is_multiple_of(super::V2_BLOCK_SIZE as usize) {
                 out.push(0);
             }
             let offset_block = (out.len() as u64 / super::V2_BLOCK_SIZE) as u32;

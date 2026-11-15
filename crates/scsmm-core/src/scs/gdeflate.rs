@@ -560,8 +560,10 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     let offsets: Vec<usize> = data
         .get(8..table_end)
         .ok_or_else(|| bad("truncated tile table"))?
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as usize)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c) as usize)
         .collect();
     let input = &data[table_end..];
 

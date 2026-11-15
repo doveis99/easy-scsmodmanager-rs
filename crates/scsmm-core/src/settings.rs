@@ -216,10 +216,7 @@ mod tests {
     fn round_trip_and_forward_compatibility() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested").join("settings.json");
-        let mut s = Settings::default();
-        s.workshop_lookup = false;
-        s.backup_keep = 3;
-        s.last_game = Some(Game::Ats);
+        let mut s = Settings { workshop_lookup: false, backup_keep: 3, last_game: Some(Game::Ats), ..Settings::default() };
         s.ats.documents_dir = Some(PathBuf::from("X:/ats"));
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);
@@ -237,12 +234,14 @@ mod tests {
     fn view_survives_a_restart_and_unknown_values_fall_back() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("settings.json");
-        let mut s = Settings::default();
-        s.view = ViewSettings {
-            sort: "date".into(),
-            category: "truck".into(),
-            source: "workshop".into(),
-            favorites: true,
+        let s = Settings {
+            view: ViewSettings {
+                sort: "date".into(),
+                category: "truck".into(),
+                source: "workshop".into(),
+                favorites: true,
+            },
+            ..Settings::default()
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path).view, s.view);
@@ -267,8 +266,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("settings.json");
         assert_eq!(Settings::load(&path).language, None);
-        let mut s = Settings::default();
-        s.language = Some("zh".into());
+        let mut s = Settings { language: Some("zh".into()), ..Settings::default() };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path).language.as_deref(), Some("zh"));
         fs::write(&path, br#"{"language": "tlh"}"#).unwrap();
@@ -280,8 +278,10 @@ mod tests {
 
     #[test]
     fn normalize_cleans_names_and_empty_paths() {
-        let mut s = Settings::default();
-        s.map_base_names = vec!["  Loading Screen ".into(), "".into(), "loading screen".into(), "X".into()];
+        let mut s = Settings {
+            map_base_names: vec!["  Loading Screen ".into(), "".into(), "loading screen".into(), "X".into()],
+            ..Settings::default()
+        };
         s.ets2.documents_dir = Some(PathBuf::new());
         s.normalize();
         assert_eq!(s.map_base_names, ["Loading Screen", "X"]);
