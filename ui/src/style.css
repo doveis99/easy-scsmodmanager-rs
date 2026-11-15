@@ -246,9 +246,11 @@ input[type="search"] {
   padding: 10px 14px;
 }
 
-/* five buttons do not fit beside the title in a narrow window */
+/* five buttons do not fit beside the title in a narrow window: those that
+   wrap stay on the right, where the others are */
 .pane.order > .toolbar {
   flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .pane-title {
@@ -259,6 +261,28 @@ input[type="search"] {
 .hint {
   padding: 0 14px 8px;
   font-size: 12px;
+}
+
+/* the count of the load order, and what there is to look at in it */
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
+/* a button that reads as a link in a line of text */
+.link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.link:hover {
+  text-decoration: underline;
 }
 
 /* -------------------------------------------------------------- grid */
@@ -309,6 +333,32 @@ input[type="search"] {
   overflow: hidden;
   color: var(--line);
   font-weight: 700;
+  cursor: pointer;
+}
+
+.card-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* says that the mod is in the load order */
+.active-mark {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* the load order differs from what the profile holds */
+.badge.unsaved {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+  cursor: help;
 }
 
 .card-icon img {
@@ -561,9 +611,30 @@ button.badge.action:hover {
 }
 
 .grip {
-  color: var(--line);
+  color: color-mix(in srgb, var(--muted) 60%, transparent);
   font-size: 12px;
   letter-spacing: -2px;
+}
+
+.row.mod:hover .grip {
+  color: var(--text);
+}
+
+/* a row an action has just added or pointed to */
+.row.mod.flash {
+  animation: flash 1.4s ease-out;
+}
+
+@keyframes flash {
+  from {
+    box-shadow: inset 0 0 0 2px var(--accent);
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+}
+
+.rows .empty {
+  padding: 22px 10px 8px;
+  line-height: 1.5;
 }
 
 .row-name {
@@ -905,6 +976,49 @@ button.badge.action:hover {
 
 .preset-list .empty {
   padding: 24px 0;
+}
+
+/* one kind of thing to share: what it is, then export and import */
+.share-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.share-about {
+  flex: 1;
+  min-width: 0;
+}
+
+/* a path field and the button that picks a folder for it */
+.path-row {
+  display: flex;
+  gap: 8px;
+}
+
+.path-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* what the mouse and the keys do: the action, then what it is for */
+.help-keys {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 0;
+}
+
+.help-keys dt {
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.help-keys dd {
+  margin: 0;
 }
 
 .share-list {

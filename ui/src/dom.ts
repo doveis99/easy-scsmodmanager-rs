@@ -70,8 +70,13 @@ export function openDialog<T>(options: DialogOptions<T>): Promise<T> {
     bodyEl.classList.toggle("pre", !!options.pre);
     modal.classList.toggle("wide", !!options.wide);
 
+    // the page behind the dialog takes neither clicks nor the Tab key
+    const behind = [...document.body.children].filter((el) => el !== modal && el instanceof HTMLElement);
+    for (const el of behind) el.toggleAttribute("inert", true);
+
     let busy = false;
     const finish = (value: T) => {
+      for (const el of behind) el.toggleAttribute("inert", false);
       modal.hidden = true;
       bodyEl.replaceChildren();
       actions.replaceChildren();
@@ -120,7 +125,12 @@ export function openDialog<T>(options: DialogOptions<T>): Promise<T> {
     document.addEventListener("keydown", onKey);
     modal.addEventListener("mousedown", onBackdrop);
     modal.hidden = false;
-    (buttons.find((b) => b.id === "modal-ok") ?? buttons[buttons.length - 1])?.focus();
+    // Enter goes to the action the dialog is for. Where there is none (a
+    // menu of equal choices) or it destroys something, it goes to the way
+    // out instead: the focus ring must not single out a side action.
+    const main = buttons.find((b) => b.classList.contains("primary"));
+    const wayOut = buttons.find((b) => b.id === "modal-cancel");
+    (main ?? wayOut ?? buttons[buttons.length - 1])?.focus();
   });
 }
 

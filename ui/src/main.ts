@@ -594,14 +594,18 @@ async function showMissing(item: ActiveItem) {
     ],
   });
   if (choice !== "activate") return;
-  // on top of the list, where a new mod goes anyway, the one that brings
-  // most first; the layout says if that is the wrong group
+  // each on top of its own group, where a new mod goes anyway; of several
+  // in one group the one that brings most first
+  const added: ActiveItem[] = [];
   for (const m of wanted.reverse()) {
     if (activeNames().has(m.id)) continue;
-    state.active.unshift({ name: m.id, display_name: m.display_name, token: m.group_token, installed: true, compat: m.compat });
+    const fresh: ActiveItem = { name: m.id, display_name: m.display_name, token: m.group_token, installed: true, compat: m.compat };
+    insertIntoGroup(fresh);
+    added.push(fresh);
   }
   await relayout();
-  setStatus(t("needs.activated", { n: wanted.length }) + t("sort.saveNote"), "ok");
+  revealRows(added);
+  setStatus(t("needs.activated", { n: added.length }) + t("sort.saveNote"), "ok");
 }
 
 // ------------------------------------------------------------ conflicts
@@ -832,6 +836,25 @@ function evidenceText(m: Mod): string {
     .join(", ");
 }
 
+/** Workshop descriptions are written in Steam's BBCode: the text without
+ *  the markup. Only tags of that markup go; other brackets stay. */
+function plainDescription(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/\[img\][^[]*\[\/img\]/gi, "")
+    .replace(/\[url=([^\]]+)\]([\s\S]*?)\[\/url\]/gi, (_whole, url: string, label: string) =>
+      !label.trim() || label.trim() === url.trim() ? url : `${label} (${url})`,
+    )
+    .replace(/\[\*\][ \t]*/g, "• ")
+    .replace(
+      /\[\/?(?:h[1-6]|b|i|u|s|strike|list|olist|ul|ol|url|code|noparse|spoiler|hr|table|tr|th|td|center|(?:quote|color|size|font)(?:=[^\]]*)?)\]/gi,
+      "",
+    )
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function lockedTitle(m: Mod): string {
   return (
     t("locked.title", { hidden: num(m.hidden_files), named: num(m.hidden_named) })
@@ -841,7 +864,11 @@ function lockedTitle(m: Mod): string {
 function modCard(m: Mod, isActive: boolean): HTMLElement {
   const pins = m.category_pins;
   const current = pins.length === 0 ? "" : pins.length === 1 ? pins[0] : MULTI_PINS;
-  const iconHolder = h("div", { class: "card-icon", "data-mod-id": m.id }, h("span", {}, "SCS"));
+  const iconHolder = h(
+    "div",
+    { class: "card-icon", "data-mod-id": m.id, title: t("card.details"), onclick: () => void openDetails(m) },
+    h("span", {}, "SCS"),
+  );
   if (m.has_icon) {
     const cached = icons.get(`${state.game}/${m.id}`);
     if (cached) iconHolder.replaceChildren(h("img", { src: cached, alt: "" }));
@@ -875,10 +902,15 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
   );
   const locked = m.hidden_files > 0;
 
-  const meta = [m.author, m.version && `v${m.version}`].filter(Boolean).join(" · ");
+  // many versions already come with their "v"
+  const meta = [m.author, m.version && (/^v/i.test(m.version) ? m.version : `v${m.version}`)].filter(Boolean).join(" · ");
+  const about = m.description ? plainDescription(m.description) : "";
   return h(
     "article",
-    { class: "card" + (isActive ? " active" : "") + (m.error ? " broken" : ""), title: m.description ?? m.path },
+    {
+      class: "card" + (isActive ? " active" : "") + (m.error ? " broken" : ""),
+      title: about ? (about.length > 400 ? `${about.slice(0, 400)}…` : about) : m.path,
+    },
     iconHolder,
     h(
       "div",
@@ -929,12 +961,18 @@ function modCard(m: Mod, isActive: boolean): HTMLElement {
         categorySelect,
       ),
       h(
-        "button",
-        {
-          class: "btn small" + (isActive ? "" : " primary"),
-          onclick: () => void (isActive ? removeActive(m.id) : addActive(m)),
-        },
-        isActive ? t("card.deactivate") : t("card.activate"),
+        "div",
+        { class: "card-actions-right" },
+        // the state in words, beside the button that changes it
+        isActive ? h("span", { class: "active-mark", title: t("badge.activeTitle") }, `✓ ${t("badge.active")}`) : null,
+        h(
+          "button",
+          {
+            class: "btn small" + (isActive ? "" : " primary"),
+            onclick: () => void (isActive ? removeActive(m.id) : addActive(m)),
+          },
+          isActive ? t("card.deactivate") : t("card.activate"),
+        ),
       ),
     ),
   );
@@ -945,28 +983,43 @@ function renderOrder() {
   const { rows } = state.layout;
   // a mod outside its group is only a problem when nothing holds it there
   const held = new Set(state.plan.held);
-  const outside = rows.flatMap((r) => (r.kind === "mod" && r.misplaced ? [state.active[r.index]?.name] : []));
-  const heldCount = outside.filter((n) => n !== undefined && held.has(n)).length;
-  const misplaced = outside.length - heldCount;
+  const outside = rows.flatMap((r) => (r.kind === "mod" && r.misplaced && state.active[r.index] ? [state.active[r.index]] : []));
+  const heldRows = outside.filter((a) => held.has(a.name));
+  const misplaced = outside.filter((a) => !held.has(a.name));
   const dirty = isDirty();
 
-  const overridden = Object.keys(state.conflicts.overrides).length;
-  const incompatible = state.active.filter((a) => a.compat === "incompatible").length;
-  const lacking = state.active.filter((a) => state.missing[a.name]).length;
-  $("order-summary").textContent =
-    t("order.active", { n: state.active.length }) +
-    (misplaced ? t("order.misplaced", { n: misplaced }) : "") +
-    (heldCount ? t("order.held", { n: heldCount }) : "") +
-    (overridden ? t("order.overridden", { n: overridden }) : "") +
-    (lacking ? t("order.lacking", { n: lacking }) : "") +
-    (state.worldMap?.mismatch ? t("order.worldmapOff") : "") +
-    (state.worldMap?.outside.length ? t("order.worldmapOutside", { n: state.worldMap.outside.length }) : "") +
-    (incompatible ? t("order.incompatible", { n: incompatible }) : "");
+  const overridden = state.active.filter((a) => state.conflicts.overrides[a.name]);
+  const incompatible = state.active.filter((a) => a.compat === "incompatible");
+  const lacking = state.active.filter((a) => state.missing[a.name]);
+  const beyond = new Set(state.worldMap?.outside.map((o) => o.name));
+  const showWorldMap = () => void infoModal(t("worldmap.title"), worldMapReport());
+  // what there is to look at, each a button that leads to it
+  const notes: SummaryNote[] = [
+    { key: "misplaced", kind: "warn", text: t("order.misplaced", { n: misplaced.length }), rows: misplaced },
+    { key: "held", kind: "keep", text: t("order.held", { n: heldRows.length }), rows: heldRows },
+    { key: "overridden", kind: "keep", text: t("order.overridden", { n: overridden.length }), rows: overridden },
+    { key: "lacking", kind: "warn", text: t("order.lacking", { n: lacking.length }), rows: lacking },
+    { key: "worldmapOff", kind: "warn", text: t("order.worldmapOff"), rows: [], report: state.worldMap?.mismatch ? showWorldMap : undefined },
+    {
+      key: "worldmapOutside",
+      kind: "warn",
+      text: t("order.worldmapOutside", { n: beyond.size }),
+      rows: state.active.filter((a) => beyond.has(a.name)),
+    },
+    { key: "incompatible", kind: "err", text: t("order.incompatible", { n: incompatible.length }), rows: incompatible },
+  ];
+  $("order-summary").replaceChildren(
+    h("span", {}, t("order.active", { n: state.active.length })),
+    // beside the count rather than in the toolbar, whose buttons need its width
+    ...(dirty ? [h("span", { class: "badge unsaved", id: "unsaved", title: t("order.unsavedTitle") }, t("order.unsaved"))] : []),
+    ...notes.filter((n) => n.rows.length || n.report).map(summaryNote),
+  );
   $("show-conflicts").hidden =
-    overridden === 0 && Object.keys(state.conflicts.frequent).length === 0;
+    overridden.length === 0 && Object.keys(state.conflicts.frequent).length === 0;
   $("show-worldmap").hidden = !state.worldMap;
   $("show-worldmap").classList.toggle("attention", !!state.worldMap?.problem);
   $<HTMLButtonElement>("auto-sort").disabled = state.plan.sorted;
+  $("auto-sort").title = state.plan.sorted ? t("order.autoSortDone") : t("order.autoSortTitle");
   $<HTMLButtonElement>("revert").disabled = !dirty;
   $<HTMLButtonElement>("save").disabled = !dirty || !state.profilePath;
   renderPresetSelect();
@@ -993,6 +1046,8 @@ function renderOrder() {
   const tail = h("div", { class: "row tail", "aria-hidden": "true" });
   tail.dataset.insertAt = String(state.active.length);
   rowsEl.replaceChildren(
+    // an empty list of a profile says how mods get into it
+    ...(state.active.length === 0 && state.profilePath ? [h("div", { class: "empty" }, t("order.empty"))] : []),
     ...rows.flatMap((row, i) => {
       // a layout that is momentarily out of step with the list draws nothing
       if (row.kind === "mod" && !state.active[row.index]) return [];
@@ -1013,7 +1068,37 @@ function renderOrder() {
   paintRelations();
 }
 
+/** One thing the summary above the load order points out. */
+interface SummaryNote {
+  key: string;
+  kind: "warn" | "err" | "keep";
+  text: string;
+  /** The rows it is about; a press goes through them one by one. */
+  rows: ActiveItem[];
+  /** Where no single row is to blame: what a press shows instead. */
+  report?: () => void;
+}
+
+/** Which of a note's rows the last press went to. */
+const noteCursor = new Map<string, number>();
+
+function summaryNote(note: SummaryNote): HTMLElement {
+  const jump = () => {
+    if (note.rows.length === 0) return note.report?.();
+    const at = ((noteCursor.get(note.key) ?? -1) + 1) % note.rows.length;
+    noteCursor.set(note.key, at);
+    revealRows([note.rows[at]], true);
+  };
+  return h(
+    "button",
+    { class: `badge action ${note.kind}`, title: note.rows.length ? t("order.jump") : t("order.jumpReport"), onclick: jump },
+    note.text,
+  );
+}
+
 function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLElement {
+  const name = item.display_name || item.name;
+  const inLibrary = state.mods.some((m) => m.id === item.name);
   return h(
     "div",
     {
@@ -1027,7 +1112,8 @@ function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLEle
       "data-index": String(row.index),
     },
     h("span", { class: "grip", "aria-hidden": "true" }, "⋮⋮"),
-    h("span", { class: "row-name" }, item.display_name || item.name),
+    // the name may be cut short: the tooltip has all of it
+    h("span", { class: "row-name", title: inLibrary ? `${name}\n${t("order.rowTitle")}` : name }, name),
     // filled in by paintRelations for the rows that belong to a picked one
     h("span", { class: "badge rel", hidden: true }),
     row.misplaced ? placementBadge(row, item) : null,
@@ -1054,17 +1140,49 @@ function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLEle
 
 // -------------------------------------------------------------- actions
 
+/** Put `item` on top of its own group: there it is in order itself and
+ *  puts no other mod out of order. */
+function insertIntoGroup(item: ActiveItem) {
+  const group = groupIndexOf(item.token);
+  const at = state.active.findIndex((a) => groupIndexOf(a.token) >= group);
+  state.active.splice(at < 0 ? state.active.length : at, 0, item);
+}
+
+/** Bring rows of the load order into view and let them light up for a
+ *  moment, so that what an action touched can be found. */
+function revealRows(items: ActiveItem[], focus = false) {
+  const rowsEl = $("rows");
+  const bounds = rowsEl.getBoundingClientRect();
+  let first = true;
+  for (const item of items) {
+    const row = rowsEl.querySelector<HTMLElement>(`.row.mod[data-index="${state.active.indexOf(item)}"]`);
+    if (!row) continue;
+    if (first) {
+      first = false;
+      const box = row.getBoundingClientRect();
+      if (box.top < bounds.top || box.bottom > bounds.bottom) row.scrollIntoView({ block: "center" });
+      if (focus) row.focus({ preventScroll: true });
+    }
+    row.classList.remove("flash");
+    void row.offsetWidth; // start the animation anew
+    row.classList.add("flash");
+  }
+}
+
 async function addActive(m: Mod) {
   if (activeNames().has(m.id)) return;
-  // new mods go on top; the layout flags them if that is the wrong group
-  state.active.unshift({
+  const item: ActiveItem = {
     name: m.id,
     display_name: m.display_name,
     token: m.group_token,
     installed: true,
     compat: m.compat,
-  });
+  };
+  insertIntoGroup(item);
   await relayout();
+  revealRows([item]);
+  const group = groupLabel(state.constants.groups[groupIndexOf(item.token)] ?? "");
+  setStatus(t("add.done", { name: m.display_name, group }) + (isDirty() ? t("sort.saveNote") : ""), "ok");
 }
 
 /** Take a mod out of the load order. Where other active mods look like
@@ -1249,15 +1367,12 @@ async function pasteMods() {
     const now = activeNames();
     const items = resolved.filter((i) => !now.has(i.name));
     // bottom-most first, so mods of one group keep the order they had
-    for (const item of [...items].reverse()) {
-      const group = groupIndexOf(item.token);
-      const at = state.active.findIndex((a) => groupIndexOf(a.token) >= group);
-      state.active.splice(at < 0 ? state.active.length : at, 0, item);
-    }
+    for (const item of [...items].reverse()) insertIntoGroup(item);
     // show what arrived
     state.selection = new Set(items);
     state.anchor = null;
     await relayout();
+    revealRows(items);
     const skipped = clip.mods.length - items.length;
     setStatus(
       t("paste.done", { n: items.length }) + (skipped ? t("paste.skipped", { n: skipped }) : "") + t("sort.saveNote"),
@@ -1287,6 +1402,35 @@ function placementBadge(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): H
     },
     t("badge.held"),
   );
+}
+
+/** How the load order is worked with: what the list means and what the
+ *  mouse and the keys do in it. */
+function openHelp() {
+  const actions = [
+    ["help.drag", "help.dragDo"],
+    ["help.move", "help.moveDo"],
+    ["help.click", "help.clickDo"],
+    ["help.multi", "help.multiDo"],
+    ["help.double", "help.doubleDo"],
+    ["help.copy", "help.copyDo"],
+    ["help.keys", "help.keysDo"],
+    ["help.remove", "help.removeDo"],
+  ] as const;
+  const body = h(
+    "div",
+    { class: "form" },
+    h("div", {}, t("help.priority")),
+    h("dl", { class: "help-keys" }, ...actions.flatMap(([what, does]) => [h("dt", {}, t(what)), h("dd", {}, t(does))])),
+    h("div", { class: "form-note" }, t("help.note")),
+  );
+  void openDialog<void>({
+    title: t("help.title"),
+    body,
+    wide: true,
+    dismiss: undefined,
+    buttons: [{ label: t("common.close"), value: undefined, kind: "primary" }],
+  });
 }
 
 /** Sort mods into their groups. Mods that share files keep their relative
@@ -1599,6 +1743,22 @@ function setupReordering() {
     if (ev.key === "Escape" && drag) finish();
   });
 
+  // a double click opens the details of the row's mod
+  rowsEl.addEventListener("dblclick", (ev) => {
+    if ((ev.target as HTMLElement).closest("button")) return;
+    const row = (ev.target as HTMLElement).closest<HTMLElement>(".row.mod");
+    const item = state.active[Number(row?.dataset.index ?? -1)];
+    const mod = item && state.mods.find((m) => m.id === item.name);
+    if (!mod) return;
+    // its two clicks picked the row and let go of it again
+    if (!state.selection.has(item)) {
+      state.selection.add(item);
+      state.anchor = item;
+      paintSelection();
+    }
+    void openDetails(mod);
+  });
+
   // keyboard: Space picks the focused row, Ctrl+A all of them, Escape none
   rowsEl.addEventListener("keydown", (ev) => {
     if (ev.altKey || (ev.target as HTMLElement).closest("button")) return;
@@ -1719,12 +1879,13 @@ async function openDetails(m: Mod) {
   }
   if (m.error) rows.push([t("detail.readError"), m.error]);
   const error = h("div", { class: "form-error", role: "alert" });
+  const about = m.description ? plainDescription(m.description) : "";
   const body = h(
     "div",
     { class: "detail" },
     icon ? h("img", { class: "detail-icon", src: icon, alt: "" }) : null,
     h("dl", {}, ...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
-    m.description ? h("div", { class: "detail-desc" }, m.description) : null,
+    about ? h("div", { class: "detail-desc" }, about) : null,
     error,
   );
   const buttons: { label: string; value: DetailAction; kind?: "primary" | "danger" }[] = [
@@ -2086,10 +2247,34 @@ async function openSettings() {
       control,
       note ? h("span", { class: "form-note" }, note) : null,
     );
-  const pathFields = (title: string, group: { documents: HTMLElement; workshop: HTMLElement }) => [
+  /** A path can be typed, or picked in the system's folder dialog. */
+  const withBrowse = (input: HTMLInputElement, detected: string | null | undefined) =>
+    h(
+      "span",
+      { class: "path-row" },
+      input,
+      h(
+        "button",
+        {
+          type: "button",
+          class: "btn",
+          onclick: async () => {
+            try {
+              const start = input.value.trim() || detected || undefined;
+              const dir = await pickOpen({ directory: true, multiple: false, defaultPath: start });
+              if (typeof dir === "string") input.value = dir;
+            } catch (e) {
+              error.textContent = errorText(e);
+            }
+          },
+        },
+        t("settings.browse"),
+      ),
+    );
+  const pathFields = (title: string, game: GameId) => [
     h("h3", {}, title),
-    field(t("settings.docsDir"), group.documents, t("settings.docsNote")),
-    field(t("settings.wsDir"), group.workshop, t("settings.wsNote")),
+    field(t("settings.docsDir"), withBrowse(inputs[game].documents, view.detected[game]?.documents_dir), t("settings.docsNote")),
+    field(t("settings.wsDir"), withBrowse(inputs[game].workshop, view.detected[game]?.workshop_dir), t("settings.wsNote")),
   ];
   const body = h(
     "div",
@@ -2112,8 +2297,8 @@ async function openSettings() {
       updateResult,
     ),
     field(t("settings.keep"), keep, t("settings.keepNote", { path: view.backup_root })),
-    ...pathFields(t("settings.ets2Paths"), inputs.ets2),
-    ...pathFields(t("settings.atsPaths"), inputs.ats),
+    ...pathFields(t("settings.ets2Paths"), "ets2"),
+    ...pathFields(t("settings.atsPaths"), "ats"),
     h("h3", {}, t("settings.mapBase")),
     field(
       t("settings.mapBaseNames"),
@@ -2773,29 +2958,40 @@ async function openPresets() {
 type ShareAction = "close" | "export" | "import" | "combo-export" | "combo-import";
 
 async function openShareMenu() {
+  let picked: ShareAction = "close";
+  const pick = (value: ShareAction) => () => {
+    picked = value;
+    dismissDialog();
+  };
+  const nothing = state.active.length === 0;
+  /** One kind of thing to exchange: what it is, and the two directions. */
+  const section = (title: string, note: string, out: ShareAction, into: ShareAction) =>
+    h(
+      "div",
+      { class: "share-section" },
+      h("div", { class: "share-about" }, h("strong", {}, title), h("div", { class: "form-note" }, note)),
+      h(
+        "button",
+        { class: "btn", disabled: nothing, ...(nothing ? { title: t("share.nothing") } : {}), onclick: pick(out) },
+        t("share.exportBtn"),
+      ),
+      h("button", { class: "btn", onclick: pick(into) }, t("share.importBtn")),
+    );
   const body = h(
     "div",
     { class: "form" },
     h("div", {}, t("share.intro")),
-    h(
-      "div",
-      { class: "form-note" },
-      t("share.note"),
-    ),
+    section(t("share.wholeTitle"), t("share.wholeNote"), "export", "import"),
+    section(t("combo.title"), t("combo.note"), "combo-export", "combo-import"),
   );
-  const action = await openDialog<ShareAction>({
+  await openDialog<void>({
     title: t("order.share"),
     body,
     wide: true,
-    dismiss: "close",
-    buttons: [
-      { label: t("common.close"), value: "close" },
-      { label: t("share.exportAll"), value: "export", kind: "primary" },
-      { label: t("share.importAll"), value: "import" },
-      { label: t("combo.export"), value: "combo-export" },
-      { label: t("combo.import"), value: "combo-import" },
-    ],
+    dismiss: undefined,
+    buttons: [{ label: t("common.close"), value: undefined }],
   });
+  const action = picked as ShareAction;
   try {
     if (action === "export") {
       const path = await pickSave({ defaultPath: `${fileStem(currentProfileName())}.modshare.json`, filters: JSON_FILTER });
@@ -2908,6 +3104,7 @@ function bindControls() {
     icons.clear();
     await loadGame(state.game);
   });
+  $("order-help").addEventListener("click", () => openHelp());
   $("auto-sort").addEventListener("click", () => void autoSort());
   $("show-conflicts").addEventListener("click", () => void infoModal(t("conflict.title"), conflictReport()));
   $("show-worldmap").addEventListener("click", () => void infoModal(t("worldmap.title"), worldMapReport()));

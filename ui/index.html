@@ -19,12 +19,12 @@
         <span data-i18n="top.profile"></span>
         <select id="profile-select"></select>
       </label>
-      <button id="open-backups" class="btn" data-i18n="top.backups"></button>
+      <button id="open-backups" class="btn" data-i18n="top.backups" data-i18n-title="top.backupsTitle"></button>
       <div class="spacer"></div>
       <span class="muted" id="game-version"></span>
       <button id="open-update" class="btn update" data-i18n-title="update.buttonTitle" hidden></button>
       <button id="open-settings" class="btn" data-i18n="top.settings"></button>
-      <button id="rescan" class="btn" data-i18n="top.rescan"></button>
+      <button id="rescan" class="btn" data-i18n="top.rescan" data-i18n-title="top.rescanTitle"></button>
     </header>
 
     <main class="panes">
@@ -49,13 +49,12 @@
 
       <section class="pane order" data-i18n-aria="order.aria">
         <div class="toolbar">
-          <strong class="pane-title" data-i18n="order.title"></strong>
-          <div class="spacer"></div>
-          <button id="open-share" class="btn" data-i18n="order.share"></button>
-          <button id="show-conflicts" class="btn" data-i18n="order.conflicts" hidden></button>
+          <strong class="pane-title" data-i18n="order.title"></strong>          <div class="spacer"></div>
+          <button id="open-share" class="btn" data-i18n="order.share" data-i18n-title="order.shareTitle"></button>
+          <button id="show-conflicts" class="btn" data-i18n="order.conflicts" data-i18n-title="order.conflictsTitle" hidden></button>
           <button id="auto-sort" class="btn" data-i18n="order.autoSort"></button>
-          <button id="revert" class="btn" data-i18n="order.revert" disabled></button>
-          <button id="save" class="btn primary" data-i18n="common.save" disabled></button>
+          <button id="revert" class="btn" data-i18n="order.revert" data-i18n-title="order.revertTitle" disabled></button>
+          <button id="save" class="btn primary" data-i18n="common.save" data-i18n-title="order.saveTitle" disabled></button>
         </div>
         <div class="toolbar presetbar">
           <label class="field">
@@ -67,8 +66,11 @@
           <button id="copy-mods" class="btn small" data-i18n-title="copy.title"></button>
           <button id="paste-mods" class="btn small" data-i18n-title="paste.title"></button>
         </div>
-        <div class="count" id="order-summary"></div>
-        <div class="hint muted" data-i18n="order.hint"></div>
+        <div class="count summary" id="order-summary"></div>
+        <div class="hint muted">
+          <span data-i18n="order.hint"></span>
+          <button id="order-help" class="link" data-i18n="order.help"></button>
+        </div>
         <div class="rows" id="rows"></div>
       </section>
     </main>
