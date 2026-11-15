@@ -46,9 +46,8 @@ fn check(label: &str, ok: bool, failures: &mut u32) {
 fn run(original_sii: &Path) -> Result<u32, Box<dyn std::error::Error>> {
     let original_dir = original_sii.parent().ok_or("profile path has no parent")?;
     let tmp = tempfile::tempdir()?;
-    let copy_dir_path: PathBuf = tmp.path().join("profiles").join(
-        original_dir.file_name().ok_or("profile dir has no name")?,
-    );
+    let copy_dir_path: PathBuf =
+        tmp.path().join("profiles").join(original_dir.file_name().ok_or("profile dir has no name")?);
     copy_dir(original_dir, &copy_dir_path)?;
     let sii = copy_dir_path.join("profile.sii");
     let backups = tmp.path().join("backups");
@@ -106,7 +105,8 @@ fn run(original_sii: &Path) -> Result<u32, Box<dyn std::error::Error>> {
     let originals = fs::read_dir(original_dir)?.flatten().filter(|e| e.path().is_file()).count();
     check(
         &format!("backup holds all {originals} top-level files of the profile dir"),
-        (0..zip.len()).filter(|&i| !zip.by_index(i).map(|f| f.name().contains('/')).unwrap_or(true)).count() == originals,
+        (0..zip.len()).filter(|&i| !zip.by_index(i).map(|f| f.name().contains('/')).unwrap_or(true)).count()
+            == originals,
         &mut failures,
     );
 
@@ -115,11 +115,7 @@ fn run(original_sii: &Path) -> Result<u32, Box<dyn std::error::Error>> {
     let restored_text = sii_bytes_to_text(&fs::read(&sii)?, true)?;
     println!("after saving the original order again:");
     check("list equals the original", read_profile(&sii)?.active_mods == original.active_mods, &mut failures);
-    check(
-        "text is byte-identical to the decrypted original",
-        restored_text == original_text,
-        &mut failures,
-    );
+    check("text is byte-identical to the decrypted original", restored_text == original_text, &mut failures);
     Ok(failures)
 }
 

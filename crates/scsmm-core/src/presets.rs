@@ -94,11 +94,7 @@ impl PresetStore {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let stamped = PresetStore {
-            format: PRESETS_FORMAT.to_string(),
-            version: PRESETS_VERSION,
-            ..self.clone()
-        };
+        let stamped = PresetStore { format: PRESETS_FORMAT.to_string(), version: PRESETS_VERSION, ..self.clone() };
         let json = serde_json::to_vec_pretty(&stamped).map_err(|e| format_err(e.to_string()))?;
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, json)?;
@@ -151,10 +147,7 @@ impl PresetStore {
     pub fn rename(&mut self, game: Game, name: &str, new_name: &str) -> std::result::Result<String, PresetError> {
         let new_name = clean_name(new_name)?;
         let list = self.list_mut(game);
-        let index = list
-            .iter()
-            .position(|p| same_name(&p.name, name))
-            .ok_or(PresetError::NotFound)?;
+        let index = list.iter().position(|p| same_name(&p.name, name)).ok_or(PresetError::NotFound)?;
         if list.iter().enumerate().any(|(i, p)| i != index && same_name(&p.name, &new_name)) {
             return Err(PresetError::NameTaken);
         }
@@ -164,10 +157,7 @@ impl PresetStore {
 
     pub fn remove(&mut self, game: Game, name: &str) -> std::result::Result<(), PresetError> {
         let list = self.list_mut(game);
-        let index = list
-            .iter()
-            .position(|p| same_name(&p.name, name))
-            .ok_or(PresetError::NotFound)?;
+        let index = list.iter().position(|p| same_name(&p.name, name)).ok_or(PresetError::NotFound)?;
         list.remove(index);
         Ok(())
     }
@@ -178,13 +168,7 @@ mod tests {
     use super::*;
 
     fn mods(names: &[&str]) -> Vec<ActiveMod> {
-        names
-            .iter()
-            .map(|n| ActiveMod {
-                name: n.to_string(),
-                display_name: format!("{n} (shown)"),
-            })
-            .collect()
+        names.iter().map(|n| ActiveMod { name: n.to_string(), display_name: format!("{n} (shown)") }).collect()
     }
 
     #[test]

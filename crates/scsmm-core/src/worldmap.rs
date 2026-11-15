@@ -335,11 +335,8 @@ impl Report {
 /// How much of what `needy` needs from elsewhere `holder` has, as
 /// (files, of all it needs).
 fn needs_from(needy: &ScannedMod, holder: &ScannedMod) -> (usize, usize) {
-    let files = needy
-        .wants
-        .iter()
-        .filter(|path| holder.provides.binary_search(&city_hash64(path.as_bytes())).is_ok())
-        .count();
+    let files =
+        needy.wants.iter().filter(|path| holder.provides.binary_search(&city_hash64(path.as_bytes())).is_ok()).count();
     (files, needy.wants.len())
 }
 
@@ -386,7 +383,12 @@ fn same_release(a: &ScannedMod, b: &ScannedMod) -> bool {
 /// first, as indices into `installed` (`None` for an entry that is not
 /// installed); `game` the game's own placement where it could be read.
 /// `None` when no active mod has anything to do with the map.
-pub fn analyze(installed: &[ScannedMod], active: &[Option<usize>], game: Option<MapData>, scale: f64) -> Option<Report> {
+pub fn analyze(
+    installed: &[ScannedMod],
+    active: &[Option<usize>],
+    game: Option<MapData>,
+    scale: f64,
+) -> Option<Report> {
     let facts = |position: usize| active[position].map(|index| &installed[index].world_map);
     let positions = |test: fn(&MapFacts) -> bool| -> Vec<usize> {
         (0..active.len()).filter(|&p| facts(p).is_some_and(test)).collect()
@@ -501,7 +503,8 @@ mod tests {
 
     #[test]
     fn the_two_values_are_read_whatever_stands_around_them() {
-        let text = "map_data : .map.data {\n\tzoom_uplift[7]: 45000.0\n\tui_map_center:\t(66700, -24700)\t// in game units\n \
+        let text =
+            "map_data : .map.data {\n\tzoom_uplift[7]: 45000.0\n\tui_map_center:\t(66700, -24700)\t// in game units\n \
                     ui_map_size:   (8127, 7928.5) # km\n\tui_map_camera_min: (-100000.0, -170000.0)\n}";
         assert_eq!(MapData::parse(text), Some(MapData { center: (66700.0, -24700.0), size_km: (8127.0, 7928.5) }));
         // a commented-out line is not a value; one value alone is not enough
@@ -523,7 +526,9 @@ mod tests {
     fn sector_names_are_told_from_other_map_files() {
         assert_eq!(sector_of("map/europe/sec+0010-0002.base"), Some(("europe", 10, -2)));
         assert_eq!(sector_of("map/russia/sec-0034+0021.base"), Some(("russia", -34, 21)));
-        for other in ["map/europe/sec+0010-0002.aux", "map/europe.mbd", "map/europe/sec+10-2.base", "def/sec+0010-0002.base"] {
+        for other in
+            ["map/europe/sec+0010-0002.aux", "map/europe.mbd", "map/europe/sec+10-2.base", "def/sec+0010-0002.base"]
+        {
             assert_eq!(sector_of(other), None, "{other}");
         }
     }
@@ -646,7 +651,8 @@ mod tests {
         // ... and not when the version differs or nothing of it is needed
         let mut other_version = released(needing(with_data("old-def", WIDE), &wants));
         other_version.manifest.as_mut().unwrap().package_version = "2.70".into();
-        let mods = [other_version, released(with_picture("pack-assets", ASSETS)), released(with_data("lone-def", WIDE))];
+        let mods =
+            [other_version, released(with_picture("pack-assets", ASSETS)), released(with_data("lone-def", WIDE))];
         assert_eq!(analyze(&mods, &all(3), Some(GAME), 19.0).unwrap().drawn_for, None);
 
         // values that could not be read are not compared either
@@ -663,7 +669,8 @@ mod tests {
         let inside: Vec<(i16, i16)> = (0..30).map(|x| (x, 0)).collect();
         let mut reaching = inside.clone();
         reaching.extend((32..40).map(|x| (x, 0)));
-        let mods = [with_sectors("near", &inside), with_sectors("far", &reaching), with_sectors("edge", &[(31, 0), (32, 0)])];
+        let mods =
+            [with_sectors("near", &inside), with_sectors("far", &reaching), with_sectors("edge", &[(31, 0), (32, 0)])];
         let report = analyze(&mods, &all(3), Some(GAME), 19.0).unwrap();
         assert_eq!(report.outside, [Outside { position: 1, sectors: 8, total: 38 }]);
         assert!(report.has_problem() && !report.mismatch);
@@ -676,10 +683,11 @@ mod tests {
     #[test]
     fn hidden_sectors_are_found_by_trying_their_names() {
         let mut locked = plain("locked");
-        let mut hidden: Vec<u64> = ["map/europe/sec+0035-0004.base", "map/europe/sec-0004+0019.base", "map/europe/sec+0035-0004.aux"]
-            .iter()
-            .map(|p| city_hash64(p.as_bytes()))
-            .collect();
+        let mut hidden: Vec<u64> =
+            ["map/europe/sec+0035-0004.base", "map/europe/sec-0004+0019.base", "map/europe/sec+0035-0004.aux"]
+                .iter()
+                .map(|p| city_hash64(p.as_bytes()))
+                .collect();
         hidden.push(city_hash64(b"map/russia/sec+0012-0020.base"));
         hidden.sort_unstable();
         locked.hidden = Arc::from(hidden);

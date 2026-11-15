@@ -28,11 +28,7 @@ impl VersionSlot {
     }
 
     pub fn matches(&self, game_version: &str) -> bool {
-        !game_version.is_empty()
-            && self
-                .compatible_versions
-                .iter()
-                .any(|p| wildcard_match(p, game_version))
+        !game_version.is_empty() && self.compatible_versions.iter().any(|p| wildcard_match(p, game_version))
     }
 }
 
@@ -89,11 +85,7 @@ pub fn pick_active_slot<'a>(slots: &'a [VersionSlot], game_version: Option<&str>
             return Some(&slot.name);
         }
     }
-    slots
-        .iter()
-        .find(|s| s.is_default())
-        .or(slots.first())
-        .map(|s| s.name.as_str())
+    slots.iter().find(|s| s.is_default()).or(slots.first()).map(|s| s.name.as_str())
 }
 
 /// True for helper names like `150`, `153_content`, `downgrade_info_package`.
@@ -127,23 +119,16 @@ fn payload_for_slot(workshop_id_dir: &Path, slot_name: &str) -> Option<PathBuf> 
 }
 
 fn sorted_children(dir: &Path) -> Vec<PathBuf> {
-    let mut children: Vec<PathBuf> = fs::read_dir(dir)
-        .map(|rd| rd.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
-    children.sort_by_key(|p| {
-        p.file_name()
-            .map(|n| n.to_string_lossy().to_lowercase())
-            .unwrap_or_default()
-    });
+    let mut children: Vec<PathBuf> =
+        fs::read_dir(dir).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    children.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default());
     children
 }
 
 /// Pick which payload inside a `<workshop-id>/` directory to scan.
 pub fn resolve_workshop_payload(workshop_id_dir: &Path, game_version: Option<&str>) -> Option<PathBuf> {
     let slots = read_versions_sii(workshop_id_dir);
-    if let Some(target) =
-        pick_active_slot(&slots, game_version).and_then(|n| payload_for_slot(workshop_id_dir, n))
-    {
+    if let Some(target) = pick_active_slot(&slots, game_version).and_then(|n| payload_for_slot(workshop_id_dir, n)) {
         return Some(target);
     }
 
@@ -156,18 +141,13 @@ pub fn resolve_workshop_payload(workshop_id_dir: &Path, game_version: Option<&st
     let children = sorted_children(workshop_id_dir);
     let name_of = |p: &Path, stem: bool| {
         let part = if stem { p.file_stem() } else { p.file_name() };
-        part.map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
+        part.map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
     };
     // first non-helper archive at the root, then first non-helper mod dir
     children
         .iter()
         .find(|p| p.is_file() && is_archive(p) && !is_helper_slot_name(&name_of(p, true)))
-        .or_else(|| {
-            children
-                .iter()
-                .find(|p| p.is_dir() && !is_helper_slot_name(&name_of(p, false)) && has_manifest(p))
-        })
+        .or_else(|| children.iter().find(|p| p.is_dir() && !is_helper_slot_name(&name_of(p, false)) && has_manifest(p)))
         .cloned()
 }
 
@@ -223,22 +203,13 @@ mod tests {
         .unwrap();
         fs::write(ws.join("latest.scs"), b"x").unwrap();
         fs::write(ws.join("158_content.scs"), b"x").unwrap();
-        assert_eq!(
-            resolve_workshop_payload(&ws, Some("1.58.1")).unwrap().file_name().unwrap(),
-            "158_content.scs"
-        );
-        assert_eq!(
-            resolve_workshop_payload(&ws, Some("1.61.0")).unwrap().file_name().unwrap(),
-            "latest.scs"
-        );
+        assert_eq!(resolve_workshop_payload(&ws, Some("1.58.1")).unwrap().file_name().unwrap(), "158_content.scs");
+        assert_eq!(resolve_workshop_payload(&ws, Some("1.61.0")).unwrap().file_name().unwrap(), "latest.scs");
 
         let bare = tmp.path().join("777");
         fs::create_dir_all(&bare).unwrap();
         fs::write(bare.join("150.scs"), b"x").unwrap();
         fs::write(bare.join("real_mod.scs"), b"x").unwrap();
-        assert_eq!(
-            resolve_workshop_payload(&bare, None).unwrap().file_name().unwrap(),
-            "real_mod.scs"
-        );
+        assert_eq!(resolve_workshop_payload(&bare, None).unwrap().file_name().unwrap(), "real_mod.scs");
     }
 }

@@ -129,18 +129,9 @@ pub fn parse_latest(body: &str) -> Result<Release> {
                 && (1..=MAX_PACKAGE_BYTES).contains(&size)
                 && sha256.len() == 64
                 && sha256.bytes().all(|b| b.is_ascii_hexdigit());
-            checkable.then(|| Package {
-                name: wanted.clone(),
-                url: url.to_string(),
-                size,
-                sha256,
-            })
+            checkable.then(|| Package { name: wanted.clone(), url: url.to_string(), size, sha256 })
         });
-    Ok(Release {
-        version: version.to_string(),
-        tag: tag.to_string(),
-        package,
-    })
+    Ok(Release { version: version.to_string(), tag: tag.to_string(), package })
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -253,10 +244,7 @@ mod net {
 
     /// Ask GitHub for the latest release.
     pub fn fetch_latest() -> Result<Release> {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(20))
-            .user_agent(USER_AGENT)
-            .build();
+        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).user_agent(USER_AGENT).build();
         let body = agent
             .get(LATEST_ENDPOINT)
             .set("Accept", "application/vnd.github+json")
@@ -328,9 +316,7 @@ mod tests {
     fn zip_of(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (name, bytes) in files {
-            writer
-                .start_file(*name, zip::write::SimpleFileOptions::default())
-                .unwrap();
+            writer.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
             writer.write_all(bytes).unwrap();
         }
         writer.finish().unwrap().into_inner()
@@ -360,17 +346,11 @@ mod tests {
         let url = "https://github.com/doveis99/easy-scsmodmanager-rs/releases/download/v0.3.0/Easy-SCS-Mod-Manager-0.3.0-portable.zip";
         let name = "Easy-SCS-Mod-Manager-0.3.0-portable.zip";
         let digest = format!("sha256:{}", SHA.to_uppercase());
-        let body = latest(
-            "v0.3.0",
-            &[asset("notes.txt", url, &digest), asset(name, url, &digest)].join(","),
-        );
+        let body = latest("v0.3.0", &[asset("notes.txt", url, &digest), asset(name, url, &digest)].join(","));
         let release = parse_latest(&body).unwrap();
         assert_eq!(release.version, "0.3.0");
         assert_eq!(release.tag, "v0.3.0");
-        assert_eq!(
-            release.page_url(),
-            "https://github.com/doveis99/easy-scsmodmanager-rs/releases/tag/v0.3.0"
-        );
+        assert_eq!(release.page_url(), "https://github.com/doveis99/easy-scsmodmanager-rs/releases/tag/v0.3.0");
         let package = release.package.unwrap();
         assert_eq!((package.name.as_str(), package.url.as_str(), package.size), (name, url, 4_626_128));
         assert_eq!(package.sha256, SHA);
@@ -386,7 +366,12 @@ mod tests {
         assert!(package(&asset(name, good_url, &digest)).is_some());
         // from somewhere else, without a digest, with another kind of digest
         assert!(package(&asset(name, "https://example.com/x.zip", &digest)).is_none());
-        assert!(package(&asset(name, "http://github.com/doveis99/easy-scsmodmanager-rs/releases/download/x.zip", &digest)).is_none());
+        assert!(package(&asset(
+            name,
+            "http://github.com/doveis99/easy-scsmodmanager-rs/releases/download/x.zip",
+            &digest
+        ))
+        .is_none());
         assert!(package(&asset(name, good_url, "")).is_none());
         assert!(package(&asset(name, good_url, "sha512:abcd")).is_none());
         assert!(package(&asset(name, good_url, "sha256:zz")).is_none());
@@ -405,12 +390,8 @@ mod tests {
     #[test]
     fn the_download_must_match_the_release() {
         let bytes = b"portable zip";
-        let package = Package {
-            name: "x.zip".into(),
-            url: String::new(),
-            size: bytes.len() as u64,
-            sha256: sha256_hex(bytes),
-        };
+        let package =
+            Package { name: "x.zip".into(), url: String::new(), size: bytes.len() as u64, sha256: sha256_hex(bytes) };
         assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         verify_package(bytes, &package).unwrap();
         assert!(verify_package(b"portable zap", &package).is_err());

@@ -67,10 +67,7 @@ impl ExtractResult {
             Err(e) => {
                 self.failed += 1;
                 if self.failures.len() < MAX_REPORTED_FAILURES {
-                    self.failures.push(ExtractFailure {
-                        entry: entry.to_string(),
-                        error: e.to_string(),
-                    });
+                    self.failures.push(ExtractFailure { entry: entry.to_string(), error: e.to_string() });
                 }
             }
         }
@@ -162,17 +159,12 @@ fn extract_hashfs(
 
     // (hash, where it goes): listed files, then the ones named after all,
     // then the nameless ones
-    let mut work: Vec<(u64, Option<String>)> = listed
-        .iter()
-        .map(|path| (reader.hash_of(path), Some(path.clone())))
-        .collect();
+    let mut work: Vec<(u64, Option<String>)> =
+        listed.iter().map(|path| (reader.hash_of(path), Some(path.clone()))).collect();
     let mut recovered: Vec<(u64, String)> = recovery.names.into_iter().collect();
     recovered.sort_by(|a, b| a.1.cmp(&b.1));
-    let mut result = ExtractResult {
-        recovered: recovered.len(),
-        unnamed: recovery.unnamed.len(),
-        ..Default::default()
-    };
+    let mut result =
+        ExtractResult { recovered: recovered.len(), unnamed: recovery.unnamed.len(), ..Default::default() };
     work.extend(recovered.into_iter().map(|(hash, path)| (hash, Some(path))));
     work.extend(recovery.unnamed.into_iter().map(|hash| (hash, None)));
     result.total = work.len();
@@ -212,15 +204,8 @@ fn extract_zip(
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<ExtractResult> {
     let mut archive = zip::ZipArchive::new(fs::File::open(scs_path)?)?;
-    let names: Vec<String> = archive
-        .file_names()
-        .filter(|n| !n.ends_with('/'))
-        .map(str::to_string)
-        .collect();
-    let mut result = ExtractResult {
-        total: names.len(),
-        ..Default::default()
-    };
+    let names: Vec<String> = archive.file_names().filter(|n| !n.ends_with('/')).map(str::to_string).collect();
+    let mut result = ExtractResult { total: names.len(), ..Default::default() };
     for (done, name) in names.iter().enumerate() {
         if should_cancel() {
             result.cancelled = true;
@@ -281,11 +266,8 @@ mod tests {
     fn extracts_a_hashfs_v1_archive_with_progress() {
         let tmp = tempfile::tempdir().unwrap();
         let scs = tmp.path().join("m.scs");
-        fs::write(
-            &scs,
-            build_v1(0, &[("manifest.sii", b"manifest", true), ("def/vehicle/a.sii", b"a", false)]),
-        )
-        .unwrap();
+        fs::write(&scs, build_v1(0, &[("manifest.sii", b"manifest", true), ("def/vehicle/a.sii", b"a", false)]))
+            .unwrap();
         let dest = tmp.path().join("out");
         let mut seen = Vec::new();
         let r = extract_scs(&scs, &dest, &mut |d, t| seen.push((d, t)), &never).unwrap();
@@ -329,15 +311,7 @@ mod tests {
     fn zip_extraction_never_leaves_the_destination() {
         let tmp = tempfile::tempdir().unwrap();
         let scs = tmp.path().join("z.scs");
-        make_zip(
-            &scs,
-            &[
-                ("def/", b""),
-                ("def/a.sii", b"a"),
-                ("../escaped.txt", b"evil"),
-                ("manifest.sii", b"m"),
-            ],
-        );
+        make_zip(&scs, &[("def/", b""), ("def/a.sii", b"a"), ("../escaped.txt", b"evil"), ("manifest.sii", b"m")]);
         let dest = tmp.path().join("nested").join("out");
         let r = extract_scs(&scs, &dest, &mut |_, _| {}, &never).unwrap();
         assert_eq!((r.total, r.extracted, r.failed), (3, 2, 1));

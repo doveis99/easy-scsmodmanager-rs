@@ -68,12 +68,8 @@ fn hash_len17_to32(s: &[u8]) -> u64 {
     let c = fetch64(s, len - 8).wrapping_mul(K2);
     let d = fetch64(s, len - 16).wrapping_mul(K0);
     hash_len16(
-        rotate(a.wrapping_sub(b), 43)
-            .wrapping_add(rotate(c, 30))
-            .wrapping_add(d),
-        a.wrapping_add(rotate(b ^ K3, 20))
-            .wrapping_sub(c)
-            .wrapping_add(len as u64),
+        rotate(a.wrapping_sub(b), 43).wrapping_add(rotate(c, 30)).wrapping_add(d),
+        a.wrapping_add(rotate(b ^ K3, 20)).wrapping_sub(c).wrapping_add(len as u64),
     )
 }
 
@@ -94,11 +90,7 @@ fn weak_hash_len32_with_seeds(s: &[u8], pos: usize, a: u64, b: u64) -> (u64, u64
 fn hash_len33_to64(s: &[u8]) -> u64 {
     let len = s.len();
     let mut z = fetch64(s, 24);
-    let mut a = fetch64(s, 0).wrapping_add(
-        (len as u64)
-            .wrapping_add(fetch64(s, len - 16))
-            .wrapping_mul(K0),
-    );
+    let mut a = fetch64(s, 0).wrapping_add((len as u64).wrapping_add(fetch64(s, len - 16)).wrapping_mul(K0));
     let mut b = rotate(a.wrapping_add(z), 52);
     let mut c = rotate(a, 37);
     a = a.wrapping_add(fetch64(s, 8));
@@ -115,11 +107,7 @@ fn hash_len33_to64(s: &[u8]) -> u64 {
     a = a.wrapping_add(fetch64(s, len - 16));
     let wf = a.wrapping_add(z);
     let ws = b.wrapping_add(rotate(a, 31)).wrapping_add(c);
-    let r = shift_mix(
-        vf.wrapping_add(ws)
-            .wrapping_mul(K2)
-            .wrapping_add(wf.wrapping_add(vs).wrapping_mul(K0)),
-    );
+    let r = shift_mix(vf.wrapping_add(ws).wrapping_mul(K2).wrapping_add(wf.wrapping_add(vs).wrapping_mul(K0)));
     shift_mix(r.wrapping_mul(K0).wrapping_add(vs)).wrapping_mul(K2)
 }
 
@@ -139,10 +127,7 @@ pub fn city_hash64(s: &[u8]) -> u64 {
     let l = len as u64;
     let mut x = fetch64(s, len - 40);
     let mut y = fetch64(s, len - 16).wrapping_add(fetch64(s, len - 56));
-    let mut z = hash_len16(
-        fetch64(s, len - 48).wrapping_add(l),
-        fetch64(s, len - 24),
-    );
+    let mut z = hash_len16(fetch64(s, len - 48).wrapping_add(l), fetch64(s, len - 24));
     let mut v = weak_hash_len32_with_seeds(s, len - 64, l, z);
     let mut w = weak_hash_len32_with_seeds(s, len - 32, y.wrapping_add(K1), x);
     x = x.wrapping_mul(K1).wrapping_add(fetch64(s, 0));
@@ -150,28 +135,13 @@ pub fn city_hash64(s: &[u8]) -> u64 {
     let mut pos = 0;
     let mut remaining = (len - 1) & !63;
     loop {
-        x = rotate(
-            x.wrapping_add(y)
-                .wrapping_add(v.0)
-                .wrapping_add(fetch64(s, pos + 8)),
-            37,
-        )
-        .wrapping_mul(K1);
-        y = rotate(
-            y.wrapping_add(v.1).wrapping_add(fetch64(s, pos + 48)),
-            42,
-        )
-        .wrapping_mul(K1);
+        x = rotate(x.wrapping_add(y).wrapping_add(v.0).wrapping_add(fetch64(s, pos + 8)), 37).wrapping_mul(K1);
+        y = rotate(y.wrapping_add(v.1).wrapping_add(fetch64(s, pos + 48)), 42).wrapping_mul(K1);
         x ^= w.1;
         y = y.wrapping_add(v.0).wrapping_add(fetch64(s, pos + 40));
         z = rotate(z.wrapping_add(w.0), 33).wrapping_mul(K1);
         v = weak_hash_len32_with_seeds(s, pos, v.1.wrapping_mul(K1), x.wrapping_add(w.0));
-        w = weak_hash_len32_with_seeds(
-            s,
-            pos + 32,
-            z.wrapping_add(w.1),
-            y.wrapping_add(fetch64(s, pos + 16)),
-        );
+        w = weak_hash_len32_with_seeds(s, pos + 32, z.wrapping_add(w.1), y.wrapping_add(fetch64(s, pos + 16)));
         std::mem::swap(&mut z, &mut x);
         pos += 64;
         remaining -= 64;
@@ -181,9 +151,7 @@ pub fn city_hash64(s: &[u8]) -> u64 {
     }
 
     hash_len16(
-        hash_len16(v.0, w.0)
-            .wrapping_add(shift_mix(y).wrapping_mul(K1))
-            .wrapping_add(z),
+        hash_len16(v.0, w.0).wrapping_add(shift_mix(y).wrapping_mul(K1)).wrapping_add(z),
         hash_len16(v.1, w.1).wrapping_add(x),
     )
 }

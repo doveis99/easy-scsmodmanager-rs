@@ -9,15 +9,8 @@ use crate::{format_err, Error, Result};
 
 pub const MANIFEST_ENTRY: &str = "manifest.sii";
 const MOD_PACKAGE_CLASS: &str = "mod_package";
-const DEFAULT_ICON_NAMES: &[&str] = &[
-    "icon.jpg",
-    "icon.png",
-    "mod_icon.jpg",
-    "mod_icon.png",
-    "preview.jpg",
-];
-const DEFAULT_DESCRIPTION_NAMES: &[&str] =
-    &["description.txt", "mod_description.txt", "readme.txt"];
+const DEFAULT_ICON_NAMES: &[&str] = &["icon.jpg", "icon.png", "mod_icon.jpg", "mod_icon.png", "preview.jpg"];
+const DEFAULT_DESCRIPTION_NAMES: &[&str] = &["description.txt", "mod_description.txt", "readme.txt"];
 /// 64 KiB is plenty for a mod readme; authors sometimes ship huge changelogs.
 const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
 
@@ -69,11 +62,7 @@ pub fn read_bundle(source: &mut dyn ModSource) -> Result<ManifestBundle> {
     let manifest = ModManifest::from_units(&parse_sii(&text)?)?;
     let icon = read_icon(source, &manifest);
     let description = read_description(source, &manifest);
-    Ok(ManifestBundle {
-        manifest,
-        icon,
-        description,
-    })
+    Ok(ManifestBundle { manifest, icon, description })
 }
 
 fn candidates<'a>(named: &'a str, defaults: &[&'a str]) -> Vec<&'a str> {

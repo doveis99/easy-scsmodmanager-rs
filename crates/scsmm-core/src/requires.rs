@@ -49,8 +49,8 @@ const MAX_EXAMPLES: usize = 8;
 /// The game's own top-level folders. A missing file inside one of them can
 /// be a leftover; a folder of any other name was brought by a mod.
 const GAME_DIRS: &[&str] = &[
-    "automat", "def", "dlc", "effect", "font", "locale", "map", "material", "model", "model2", "prefab",
-    "prefab2", "road_template", "sound", "system", "ui", "unit", "vehicle", "video",
+    "automat", "def", "dlc", "effect", "font", "locale", "map", "material", "model", "model2", "prefab", "prefab2",
+    "road_template", "sound", "system", "ui", "unit", "vehicle", "video",
 ];
 
 /// An installed mod that is not active and brings files an active one needs.
@@ -115,11 +115,8 @@ pub struct Requirements {
 impl Requirements {
     pub fn build(mods: &[ScannedMod]) -> Self {
         // hash of every needed path, then one pass over what the mods bring
-        let wanted: HashSet<u64> = mods
-            .iter()
-            .flat_map(|m| m.wants.iter())
-            .map(|path| city_hash64(path.as_bytes()))
-            .collect();
+        let wanted: HashSet<u64> =
+            mods.iter().flat_map(|m| m.wants.iter()).map(|path| city_hash64(path.as_bytes())).collect();
         let mut providers: HashMap<u64, Vec<usize>> = HashMap::new();
         if !wanted.is_empty() {
             for (index, m) in mods.iter().enumerate() {
@@ -129,11 +126,8 @@ impl Requirements {
             }
         }
         // per mod: its needed files by who has them, and the ones nobody has
-        let mut known_dirs: HashSet<&str> = GAME_DIRS
-            .iter()
-            .copied()
-            .chain(mods.iter().flat_map(|m| m.top_dirs.iter().map(String::as_str)))
-            .collect();
+        let mut known_dirs: HashSet<&str> =
+            GAME_DIRS.iter().copied().chain(mods.iter().flat_map(|m| m.top_dirs.iter().map(String::as_str))).collect();
         let mut sorted: Vec<Sorted> = Vec::with_capacity(mods.len());
         for (index, m) in mods.iter().enumerate() {
             let mut groups: HashMap<&[usize], usize> = HashMap::new();
@@ -243,8 +237,8 @@ impl Requirements {
             .filter(|(_, files)| *files >= MIN_ABSENT_IN_FOLDER)
             .map(|(_, files)| files)
             .sum();
-        let telling = needs.absent >= MIN_ABSENT
-            && (needs.absent * 100 >= needs.named * MIN_ABSENT_PERCENT || in_folders > 0);
+        let telling =
+            needs.absent >= MIN_ABSENT && (needs.absent * 100 >= needs.named * MIN_ABSENT_PERCENT || in_folders > 0);
         let absent = telling.then(|| Absent {
             files: needs.absent,
             folders: needs
@@ -275,7 +269,8 @@ mod tests {
         let mut provides: Vec<u64> = files.iter().map(|f| city_hash64(f.as_bytes())).collect();
         provides.sort_unstable();
         m.provides = Arc::from(provides);
-        let mut dirs: Vec<String> = files.iter().filter_map(|f| f.split_once('/')).map(|(d, _)| d.to_string()).collect();
+        let mut dirs: Vec<String> =
+            files.iter().filter_map(|f| f.split_once('/')).map(|(d, _)| d.to_string()).collect();
         dirs.sort();
         dirs.dedup();
         m.top_dirs = dirs;

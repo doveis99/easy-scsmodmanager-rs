@@ -13,24 +13,16 @@ pub struct DirSource {
 impl DirSource {
     pub fn open(directory: &Path) -> Result<Self> {
         if !directory.is_dir() {
-            return Err(Error::NotFound(format!(
-                "not a directory: {}",
-                directory.display()
-            )));
+            return Err(Error::NotFound(format!("not a directory: {}", directory.display())));
         }
-        Ok(Self {
-            root: directory.to_path_buf(),
-        })
+        Ok(Self { root: directory.to_path_buf() })
     }
 
     /// Resolve an archive-style relative path, refusing anything that would
     /// climb out of the mod directory (a manifest names its own icon file).
     fn resolve(&self, path: &str) -> Option<PathBuf> {
         let rel = Path::new(path.trim_start_matches('/'));
-        if rel
-            .components()
-            .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
+        if rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
             return None;
         }
         Some(self.root.join(rel))
@@ -62,10 +54,7 @@ impl ModSource for DirSource {
     }
 
     fn read_bytes(&mut self, path: &str) -> Result<Vec<u8>> {
-        let target = self
-            .resolve(path)
-            .filter(|p| p.is_file())
-            .ok_or_else(|| Error::NotFound(path.to_string()))?;
+        let target = self.resolve(path).filter(|p| p.is_file()).ok_or_else(|| Error::NotFound(path.to_string()))?;
         Ok(fs::read(target)?)
     }
 

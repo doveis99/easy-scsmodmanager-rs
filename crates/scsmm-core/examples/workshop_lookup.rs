@@ -28,7 +28,12 @@ fn main() -> ExitCode {
     if let Some(e) = &outcome.error {
         println!("metadata error: {e}");
     }
-    println!("asked {} id(s), Steam answered for {}, found {}", asked.len(), outcome.answered.len(), outcome.found.len());
+    println!(
+        "asked {} id(s), Steam answered for {}, found {}",
+        asked.len(),
+        outcome.answered.len(),
+        outcome.found.len()
+    );
     if let Err(e) = cache.store(&outcome.answered, outcome.found) {
         println!("cache error: {e}");
         return ExitCode::FAILURE;
@@ -60,6 +65,13 @@ fn main() -> ExitCode {
             }
         }
     }
-    println!("second pass asks for {} id(s) (expected 0)", cache.missing_or_stale(ids.iter().map(String::as_str)).len());
-    if failures == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    println!(
+        "second pass asks for {} id(s) (expected 0)",
+        cache.missing_or_stale(ids.iter().map(String::as_str)).len()
+    );
+    if failures == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }

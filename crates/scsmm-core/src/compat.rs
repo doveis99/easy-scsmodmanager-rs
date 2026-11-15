@@ -38,11 +38,7 @@ fn matches(game_segments: &[&str], pattern: &str) -> bool {
 
 /// The four-state compatibility verdict.
 pub fn compat_status<S: AsRef<str>>(game_version: Option<&str>, compatible_versions: &[S]) -> CompatStatus {
-    let patterns: Vec<&str> = compatible_versions
-        .iter()
-        .map(|p| p.as_ref())
-        .filter(|p| !p.is_empty())
-        .collect();
+    let patterns: Vec<&str> = compatible_versions.iter().map(|p| p.as_ref()).filter(|p| !p.is_empty()).collect();
     if patterns.is_empty() {
         return CompatStatus::Unspecified;
     }

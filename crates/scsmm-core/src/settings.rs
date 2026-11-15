@@ -45,12 +45,7 @@ pub struct ViewSettings {
 
 impl Default for ViewSettings {
     fn default() -> Self {
-        Self {
-            sort: "name".to_string(),
-            category: String::new(),
-            source: String::new(),
-            favorites: false,
-        }
+        Self { sort: "name".to_string(), category: String::new(), source: String::new(), favorites: false }
     }
 }
 
@@ -114,10 +109,8 @@ pub fn default_settings_path() -> PathBuf {
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        let mut settings: Settings = fs::read(path)
-            .ok()
-            .and_then(|raw| serde_json::from_slice(&raw).ok())
-            .unwrap_or_default();
+        let mut settings: Settings =
+            fs::read(path).ok().and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default();
         settings.view.normalize();
         settings.normalize_language();
         settings
@@ -186,12 +179,7 @@ impl Settings {
     pub fn resolve_install(&self, game: Game, steam_libraries: &[PathBuf]) -> Option<GameInstall> {
         let gs = self.game(game);
         if let Some(documents) = &gs.documents_dir {
-            return Some(install_for_overrides(
-                game,
-                documents.clone(),
-                gs.workshop_dir.clone(),
-                steam_libraries,
-            ));
+            return Some(install_for_overrides(game, documents.clone(), gs.workshop_dir.clone(), steam_libraries));
         }
         let mut install = detect_game_installs(game, steam_libraries).into_iter().next()?;
         if let Some(workshop) = &gs.workshop_dir {
@@ -261,11 +249,8 @@ mod tests {
         assert_eq!(Settings::load(&path).view, ViewSettings::default());
 
         // values this version has no control for
-        fs::write(
-            &path,
-            br#"{"view": {"sort": "size", "category": "no_such", "source": "ftp", "favorites": true}}"#,
-        )
-        .unwrap();
+        fs::write(&path, br#"{"view": {"sort": "size", "category": "no_such", "source": "ftp", "favorites": true}}"#)
+            .unwrap();
         let view = Settings::load(&path).view;
         assert_eq!((view.sort.as_str(), view.category.as_str(), view.source.as_str()), ("name", "", ""));
         assert!(view.favorites);

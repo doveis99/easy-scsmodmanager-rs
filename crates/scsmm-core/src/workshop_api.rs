@@ -25,8 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::manifest::sniff_image_mime;
 use crate::{format_err, Result};
 
-pub const DETAILS_ENDPOINT: &str =
-    "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
+pub const DETAILS_ENDPOINT: &str = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
 /// Steam tolerates more, but smaller batches recover faster on failure.
 pub const BATCH_LIMIT: usize = 50;
 /// Cached metadata older than this is fetched again (titles get renamed).
@@ -47,9 +46,7 @@ pub struct WorkshopMeta {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// Parse a `GetPublishedFileDetails` response body.
@@ -59,16 +56,8 @@ fn now_secs() -> u64 {
 pub fn parse_details(body: &str) -> Result<HashMap<String, WorkshopMeta>> {
     let payload: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format_err(format!("workshop response: {e}")))?;
-    let details = payload["response"]["publishedfiledetails"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let text = |v: &serde_json::Value| {
-        v.as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    };
+    let details = payload["response"]["publishedfiledetails"].as_array().cloned().unwrap_or_default();
+    let text = |v: &serde_json::Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     let fetched_at = now_secs();
     let mut out = HashMap::new();
     for entry in details {
@@ -108,14 +97,9 @@ impl WorkshopCache {
     /// Open (or start) the cache in `dir`. A missing or corrupt index just
     /// means an empty cache - everything in it can be fetched again.
     pub fn open(dir: &Path) -> Self {
-        let entries = fs::read(dir.join("meta.json"))
-            .ok()
-            .and_then(|raw| serde_json::from_slice(&raw).ok())
-            .unwrap_or_default();
-        Self {
-            dir: dir.to_path_buf(),
-            entries,
-        }
+        let entries =
+            fs::read(dir.join("meta.json")).ok().and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default();
+        Self { dir: dir.to_path_buf(), entries }
     }
 
     pub fn get(&self, id: &str) -> Option<&WorkshopMeta> {
@@ -131,10 +115,7 @@ impl WorkshopCache {
         let now = now_secs();
         let mut out: Vec<String> = Vec::new();
         for id in ids {
-            let fresh = self
-                .entries
-                .get(id)
-                .is_some_and(|e| now.saturating_sub(e.fetched_at) < MAX_AGE_SECS);
+            let fresh = self.entries.get(id).is_some_and(|e| now.saturating_sub(e.fetched_at) < MAX_AGE_SECS);
             if is_workshop_id(id) && !fresh && !out.iter().any(|o| o == id) {
                 out.push(id.to_string());
             }
@@ -213,10 +194,7 @@ mod net {
 
     /// A client with a generic user agent and a 20 s timeout.
     pub fn agent() -> ureq::Agent {
-        ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(20))
-            .user_agent("easy-scsmodmanager-rs")
-            .build()
+        ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).user_agent("easy-scsmodmanager-rs").build()
     }
 
     #[derive(Debug, Default)]
@@ -248,9 +226,7 @@ mod net {
 
     fn fetch_batch(agent: &ureq::Agent, ids: &[String]) -> Result<HashMap<String, WorkshopMeta>> {
         let count = ids.len().to_string();
-        let keys: Vec<String> = (0..ids.len())
-            .map(|i| format!("publishedfileids[{i}]"))
-            .collect();
+        let keys: Vec<String> = (0..ids.len()).map(|i| format!("publishedfileids[{i}]")).collect();
         let mut form: Vec<(&str, &str)> = vec![("itemcount", count.as_str())];
         form.extend(keys.iter().zip(ids).map(|(k, v)| (k.as_str(), v.as_str())));
         let body = agent
@@ -267,15 +243,9 @@ mod net {
         if !url.starts_with("https://") {
             return Err(format_err("refusing a non-https preview url"));
         }
-        let response = agent
-            .get(url)
-            .call()
-            .map_err(|e| format_err(format!("preview request failed: {e}")))?;
+        let response = agent.get(url).call().map_err(|e| format_err(format!("preview request failed: {e}")))?;
         let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .take(MAX_PREVIEW_BYTES + 1)
-            .read_to_end(&mut bytes)?;
+        response.into_reader().take(MAX_PREVIEW_BYTES + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_PREVIEW_BYTES {
             return Err(format_err("preview image is too large"));
         }
@@ -305,10 +275,7 @@ mod tests {
         assert_eq!(found.len(), 2);
         let m = &found["978025490"];
         assert_eq!(m.title.as_deref(), Some("Nice Mod"));
-        assert_eq!(
-            m.preview_url.as_deref(),
-            Some("https://images.steamusercontent.com/ugc/1/ABC/")
-        );
+        assert_eq!(m.preview_url.as_deref(), Some("https://images.steamusercontent.com/ugc/1/ABC/"));
         assert_eq!(m.time_updated, 1_700_000_000);
         // empty title and a non-https preview are dropped, the entry stays
         assert_eq!(found["222"].title, None);

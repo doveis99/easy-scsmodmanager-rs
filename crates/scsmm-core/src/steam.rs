@@ -26,11 +26,7 @@ pub fn read_registry_string(hive: &str, subkey: &str, name: &str, expand: bool) 
     if text.is_empty() {
         return None;
     }
-    Some(if expand {
-        expand_env_vars(text)
-    } else {
-        text.to_string()
-    })
+    Some(if expand { expand_env_vars(text) } else { text.to_string() })
 }
 
 #[cfg(not(windows))]
@@ -78,24 +74,17 @@ pub fn steam_install_candidates() -> Vec<PathBuf> {
     if cfg!(windows) {
         // registry first - it knows where Steam actually went
         let reg = read_registry_string("HKCU", r"Software\Valve\Steam", "SteamPath", false)
-            .or_else(|| {
-                read_registry_string("HKLM", r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath", false)
-            });
+            .or_else(|| read_registry_string("HKLM", r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath", false));
         out.extend(reg.map(PathBuf::from));
         for var in ["ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"] {
             out.extend(env::var_os(var).map(|root| PathBuf::from(root).join("Steam")));
         }
-        out.extend(
-            env::var_os("USERPROFILE")
-                .map(|p| PathBuf::from(p).join("scoop/apps/steam/current")),
-        );
+        out.extend(env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("scoop/apps/steam/current")));
     } else if cfg!(target_os = "macos") {
         out.push(home_dir().join("Library/Application Support/Steam"));
     } else {
         let home = home_dir();
-        let xdg = env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/share"));
+        let xdg = env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share"));
         out.push(home.join(".steam/steam"));
         out.push(xdg.join("Steam"));
         out.push(home.join(".var/app/com.valvesoftware.Steam/data/Steam"));
@@ -197,10 +186,7 @@ mod tests {
 "#;
         assert_eq!(
             library_paths_from_vdf(vdf),
-            vec![
-                PathBuf::from(r"C:\Program Files (x86)\Steam"),
-                PathBuf::from(r"D:\SteamLibrary")
-            ]
+            vec![PathBuf::from(r"C:\Program Files (x86)\Steam"), PathBuf::from(r"D:\SteamLibrary")]
         );
     }
 

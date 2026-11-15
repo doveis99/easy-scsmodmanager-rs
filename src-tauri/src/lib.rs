@@ -19,7 +19,9 @@ use tauri::State;
 use scsmm_core::categories::{is_official, OFFICIAL_CATEGORIES};
 use scsmm_core::compat::{compat_status, CompatStatus};
 use scsmm_core::conflicts::{self, ConflictReport};
+use scsmm_core::extract::{extract_scs_with, ExtractOptions, ExtractResult};
 use scsmm_core::game::{self, Game, GameInstall};
+use scsmm_core::gamepaths::GamePaths;
 use scsmm_core::identity::{workshop_url, ActiveModMatcher};
 use scsmm_core::load_order::{self, Row, GROUPS, MAP_BASE};
 use scsmm_core::manifest::sniff_image_mime;
@@ -27,15 +29,13 @@ use scsmm_core::presets::{default_presets_path, Preset, PresetError, PresetStore
 use scsmm_core::profile::{self, ActiveMod};
 use scsmm_core::relations;
 use scsmm_core::requires::Requirements;
-use scsmm_core::worldmap::{self, MapData};
 use scsmm_core::scanner::{self, ScannedMod};
-use scsmm_core::extract::{extract_scs_with, ExtractOptions, ExtractResult};
-use scsmm_core::gamepaths::GamePaths;
 use scsmm_core::scs::ScsFormat;
 use scsmm_core::settings::{default_settings_path, Settings, ViewSettings};
 use scsmm_core::share::{self, check_share, MapComboEntry, ShareCheck, ShareList};
 use scsmm_core::steam;
 use scsmm_core::workshop_api::{self, WorkshopCache};
+use scsmm_core::worldmap::{self, MapData};
 
 mod updater;
 
@@ -124,10 +124,7 @@ fn workshop_cache_dir() -> PathBuf {
 /// locked archives. Cache as well: rebuilt from the game when missing.
 fn game_paths_cache(game: Game) -> PathBuf {
     let base = workshop_cache_dir();
-    base.parent()
-        .unwrap_or(&base)
-        .join("gamepaths")
-        .join(format!("{}.bin", game.short_name().to_lowercase()))
+    base.parent().unwrap_or(&base).join("gamepaths").join(format!("{}.bin", game.short_name().to_lowercase()))
 }
 
 /// Open (or build) the path list of `game`. `None` when the game's
@@ -204,10 +201,7 @@ fn enter_portable_mode() {
 }
 
 fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
-    fs::read(path)
-        .ok()
-        .and_then(|raw| serde_json::from_slice(&raw).ok())
-        .unwrap_or_default()
+    fs::read(path).ok().and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default()
 }
 
 /// A pin as it may be on disk: older versions stored one token per mod.
@@ -260,23 +254,19 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> CmdResult<()> {
 
 impl Inner {
     fn settings(&mut self) -> &mut Settings {
-        self.settings
-            .get_or_insert_with(|| Settings::load(&default_settings_path()))
+        self.settings.get_or_insert_with(|| Settings::load(&default_settings_path()))
     }
 
     fn workshop(&mut self) -> &mut WorkshopCache {
-        self.workshop
-            .get_or_insert_with(|| WorkshopCache::open(&workshop_cache_dir()))
+        self.workshop.get_or_insert_with(|| WorkshopCache::open(&workshop_cache_dir()))
     }
 
     fn overrides(&mut self) -> &mut PerGame<HashMap<String, Vec<String>>> {
-        self.overrides
-            .get_or_insert_with(|| load_overrides(&overrides_path()))
+        self.overrides.get_or_insert_with(|| load_overrides(&overrides_path()))
     }
 
     fn favorites(&mut self) -> &mut PerGame<BTreeSet<String>> {
-        self.favorites
-            .get_or_insert_with(|| load_json(&favorites_path()))
+        self.favorites.get_or_insert_with(|| load_json(&favorites_path()))
     }
 
     fn presets(&mut self) -> CmdResult<&mut PresetStore> {
@@ -289,11 +279,7 @@ impl Inner {
 
     /// The categories the user pinned the mod to; empty when automatic.
     fn pins_for(&mut self, game: Game, mod_name: &str) -> Vec<String> {
-        self.overrides()
-            .get(game.short_name())
-            .and_then(|m| m.get(mod_name))
-            .cloned()
-            .unwrap_or_default()
+        self.overrides().get(game.short_name()).and_then(|m| m.get(mod_name)).cloned().unwrap_or_default()
     }
 }
 
@@ -313,9 +299,7 @@ fn settings_snapshot(state: &State<'_, AppState>) -> CmdResult<Settings> {
 /// detection), plus the Steam libraries that were found on the way.
 fn install_for(game: Game, settings: &Settings) -> CmdResult<(GameInstall, Vec<PathBuf>)> {
     let libs = steam::discover_steam_libraries();
-    let install = settings
-        .resolve_install(game, &libs)
-        .ok_or_else(|| coded("no_install", &[game.short_name()]))?;
+    let install = settings.resolve_install(game, &libs).ok_or_else(|| coded("no_install", &[game.short_name()]))?;
     Ok((install, libs))
 }
 
@@ -499,8 +483,7 @@ fn build_dtos(inner: &mut Inner, game: Game) -> Vec<ModDto> {
         requirements: _,
         map_data: _,
     } = &*inner;
-    let (Some(mods), Some(workshop), Some(settings)) = (scans.get(&game), workshop.as_ref(), settings.as_ref())
-    else {
+    let (Some(mods), Some(workshop), Some(settings)) = (scans.get(&game), workshop.as_ref(), settings.as_ref()) else {
         return Vec::new();
     };
     let version = versions.get(&game).cloned().flatten();
@@ -533,11 +516,7 @@ fn build_dtos(inner: &mut Inner, game: Game) -> Vec<ModDto> {
             ModDto {
                 group_token: group_token(&id, &display_name, &categories[0], &settings.map_base_names),
                 path: m.path.display().to_string(),
-                file_name: m
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                file_name: m.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 source: if workshop_id.is_some() { "workshop" } else { "local" },
                 workshop_url: workshop_id.as_deref().map(workshop_url),
                 format: m.format,
@@ -559,8 +538,7 @@ fn build_dtos(inner: &mut Inner, game: Game) -> Vec<ModDto> {
                 description: m.description.clone(),
                 compat: compat_status(version.as_deref(), &manifest.compatible_versions),
                 compatible_versions: manifest.compatible_versions,
-                has_icon: own_icon(m).is_some()
-                    || workshop_id.as_deref().is_some_and(|w| workshop.has_preview(w)),
+                has_icon: own_icon(m).is_some() || workshop_id.as_deref().is_some_and(|w| workshop.has_preview(w)),
                 favorite: favorites.is_some_and(|f| f.contains(&id)),
                 id,
             }
@@ -759,12 +737,7 @@ fn scan_game(game: Game, settings: &Settings) -> CmdResult<ScanOutcome> {
         }
     }
 
-    Ok(ScanOutcome {
-        mods,
-        version,
-        map_data: install_dir.as_deref().and_then(worldmap::game_map_data),
-        profile_names,
-    })
+    Ok(ScanOutcome { mods, version, map_data: install_dir.as_deref().and_then(worldmap::game_map_data), profile_names })
 }
 
 type Prewarm = (Game, Settings, std::thread::JoinHandle<CmdResult<ScanOutcome>>);
@@ -842,11 +815,7 @@ fn fetch_workshop_meta(game: String, state: State<'_, AppState>) -> CmdResult<Wo
         let ids: Vec<(String, bool)> = inner
             .scans
             .get(&game)
-            .map(|mods| {
-                mods.iter()
-                    .filter_map(|m| Some((m.workshop_id()?, own_icon(m).is_some())))
-                    .collect()
-            })
+            .map(|mods| mods.iter().filter_map(|m| Some((m.workshop_id()?, own_icon(m).is_some()))).collect())
             .unwrap_or_default();
         let to_fetch = inner.workshop().missing_or_stale(ids.iter().map(|(id, _)| id.as_str()));
         (ids, to_fetch)
@@ -858,10 +827,7 @@ fn fetch_workshop_meta(game: String, state: State<'_, AppState>) -> CmdResult<Wo
         result.asked = outcome.answered.len();
         result.titles = outcome.found.values().filter(|m| m.title.is_some()).count();
         result.error = outcome.error;
-        lock(&state)?
-            .workshop()
-            .store(&outcome.answered, outcome.found)
-            .map_err(err)?;
+        lock(&state)?.workshop().store(&outcome.answered, outcome.found).map_err(err)?;
     }
 
     // previews: only where the mod has no icon and none is stored yet
@@ -890,18 +856,12 @@ fn mod_icon(game: String, id: String, state: State<'_, AppState>) -> CmdResult<O
     let game = parse_game(&game)?;
     let mut inner = lock(&state)?;
     inner.workshop();
-    let Some(m) = inner
-        .scans
-        .get(&game)
-        .and_then(|mods| mods.iter().find(|m| m.mod_name() == id))
-    else {
+    let Some(m) = inner.scans.get(&game).and_then(|mods| mods.iter().find(|m| m.mod_name() == id)) else {
         return Ok(None);
     };
     let bytes = match own_icon(m) {
         Some(own) => Some(own.to_vec()),
-        None => m
-            .workshop_id()
-            .and_then(|w| inner.workshop.as_ref()?.read_preview(&w)),
+        None => m.workshop_id().and_then(|w| inner.workshop.as_ref()?.read_preview(&w)),
     };
     Ok(bytes.and_then(|bytes| {
         let mime = sniff_image_mime(&bytes)?;
@@ -913,12 +873,7 @@ fn mod_icon(game: String, id: String, state: State<'_, AppState>) -> CmdResult<O
 /// Pin a mod to one or more categories - the first is the main one and
 /// decides the load-order group. An empty list clears the pin.
 #[tauri::command]
-fn set_category_override(
-    game: String,
-    id: String,
-    tokens: Vec<String>,
-    state: State<'_, AppState>,
-) -> CmdResult<()> {
+fn set_category_override(game: String, id: String, tokens: Vec<String>, state: State<'_, AppState>) -> CmdResult<()> {
     let game = parse_game(&game)?;
     let mut pins: Vec<String> = Vec::new();
     for t in tokens {
@@ -957,10 +912,8 @@ fn set_favorite(game: String, id: String, favorite: bool, state: State<'_, AppSt
 fn mod_usage(game: String, ids: Vec<String>, state: State<'_, AppState>) -> CmdResult<HashMap<String, Vec<String>>> {
     let game = parse_game(&game)?;
     let (install, _) = install_for(game, &settings_snapshot(&state)?)?;
-    let profiles: Vec<profile::Profile> = profile::discover_profiles(&install)
-        .iter()
-        .filter_map(|sii| profile::read_profile(sii).ok())
-        .collect();
+    let profiles: Vec<profile::Profile> =
+        profile::discover_profiles(&install).iter().filter_map(|sii| profile::read_profile(sii).ok()).collect();
     let inner = lock(&state)?;
     let empty = Vec::new();
     let scanned = inner.scans.get(&game).unwrap_or(&empty);
@@ -1057,10 +1010,7 @@ fn reveal_mod(game: String, id: String, state: State<'_, AppState>) -> CmdResult
     #[cfg(target_os = "macos")]
     std::process::Command::new("open").arg("-R").arg(&path).spawn().map_err(err)?;
     #[cfg(all(unix, not(target_os = "macos")))]
-    std::process::Command::new("xdg-open")
-        .arg(path.parent().unwrap_or(&path))
-        .spawn()
-        .map_err(err)?;
+    std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(&path)).spawn().map_err(err)?;
     Ok(())
 }
 
@@ -1086,10 +1036,8 @@ fn folder_name_for(wanted: &str, fallback: &str) -> String {
     // Windows drops trailing dots and spaces from names, so they go too
     let edge = |c: char| c == '.' || c.is_whitespace();
     let clean = |raw: &str| -> String {
-        let replaced: String = raw
-            .chars()
-            .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
-            .collect();
+        let replaced: String =
+            raw.chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
         let short: String = replaced.trim_matches(edge).chars().take(80).collect();
         short.trim_end_matches(edge).to_string()
     };
@@ -1173,9 +1121,7 @@ fn extract_mod(
 
     // the game's own paths give the files of a locked archive their names
     let mut game_paths = game_paths_for(game, &steam::discover_steam_libraries());
-    let options = ExtractOptions {
-        game_paths: game_paths.as_mut(),
-    };
+    let options = ExtractOptions { game_paths: game_paths.as_mut() };
 
     // the screen needs a steady trickle, not one message per file
     let mut last_sent = Instant::now() - Duration::from_secs(1);
@@ -1200,10 +1146,7 @@ fn extract_mod(
     if let Ok(mut slot) = state.last_extract.lock() {
         *slot = dest.clone();
     }
-    Ok(ExtractOutcome {
-        dest: dest.map(|d| d.display().to_string()),
-        result,
-    })
+    Ok(ExtractOutcome { dest: dest.map(|d| d.display().to_string()), result })
 }
 
 /// Ask the running extraction to stop after the file it is on.
@@ -1244,10 +1187,7 @@ fn open_workshop_page(game: String, id: String, state: State<'_, AppState>) -> C
 /// version tag.
 fn open_url(url: &str) -> CmdResult<()> {
     #[cfg(windows)]
-    std::process::Command::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", url])
-        .spawn()
-        .map_err(err)?;
+    std::process::Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url]).spawn().map_err(err)?;
     #[cfg(target_os = "macos")]
     std::process::Command::new("open").arg(url).spawn().map_err(err)?;
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -1267,18 +1207,10 @@ fn list_profiles(game: String, state: State<'_, AppState>) -> CmdResult<Vec<Prof
         .map(|sii| {
             let path = sii.display().to_string();
             match profile::read_profile(&sii) {
-                Ok(p) => ProfileDto {
-                    path,
-                    profile_name: p.profile_name,
-                    active_count: p.active_mods.len(),
-                    error: None,
-                },
-                Err(e) => ProfileDto {
-                    path,
-                    profile_name: "?".into(),
-                    active_count: 0,
-                    error: Some(e.to_string()),
-                },
+                Ok(p) => {
+                    ProfileDto { path, profile_name: p.profile_name, active_count: p.active_mods.len(), error: None }
+                }
+                Err(e) => ProfileDto { path, profile_name: "?".into(), active_count: 0, error: Some(e.to_string()) },
             }
         })
         .collect())
@@ -1361,11 +1293,8 @@ fn mod_relations(
         .enumerate()
         .filter(|(_, r)| !r.is_empty())
         .map(|(i, r)| {
-            let dto = RelationsDto {
-                patches: names(&r.patches),
-                bases: names(&r.bases),
-                dependents: names(&r.dependents),
-            };
+            let dto =
+                RelationsDto { patches: names(&r.patches), bases: names(&r.bases), dependents: names(&r.dependents) };
             (items[i].name.clone(), dto)
         })
         .collect())
@@ -1430,7 +1359,11 @@ fn missing_requirements(
                     .iter()
                     .map(|p| NeededMod { id: scanned[p.index].mod_name(), files: p.files })
                     .collect(),
-                absent: missing.absent.map(|a| AbsentFiles { files: a.files, folders: a.folders, examples: a.examples }),
+                absent: missing.absent.map(|a| AbsentFiles {
+                    files: a.files,
+                    folders: a.folders,
+                    examples: a.examples,
+                }),
                 named: missing.named,
             };
             Some((item.name.clone(), dto))
@@ -1516,10 +1449,7 @@ fn world_map(game: String, items: Vec<ActiveMod>, state: State<'_, AppState>) ->
 /// Group headers and misplacement flags for tokens in display order.
 #[tauri::command]
 fn layout_rows(tokens: Vec<String>) -> Layout {
-    Layout {
-        misplaced: load_order::misplaced_count(&tokens),
-        rows: load_order::build_rows(&tokens),
-    }
+    Layout { misplaced: load_order::misplaced_count(&tokens), rows: load_order::build_rows(&tokens) }
 }
 
 #[derive(Serialize)]
@@ -1577,7 +1507,15 @@ fn sort_plan(game: String, items: Vec<ActiveMod>, state: State<'_, AppState>) ->
         .map(|&k| {
             let names = keep_above
                 .iter()
-                .filter_map(|&(u, l)| if u == k { Some(l) } else if l == k { Some(u) } else { None })
+                .filter_map(|&(u, l)| {
+                    if u == k {
+                        Some(l)
+                    } else if l == k {
+                        Some(u)
+                    } else {
+                        None
+                    }
+                })
                 .map(|i| items[i].name.clone())
                 .collect();
             (items[k].name.clone(), names)
@@ -1691,11 +1629,7 @@ fn list_backups(game: String, profile_path: String, state: State<'_, AppState>) 
     let sii = known_profile(game, &profile_path, &settings_snapshot(&state)?)?;
     Ok(profile::list_backups(&sii, &backup_root(game))
         .into_iter()
-        .map(|b| BackupDto {
-            path: b.path.display().to_string(),
-            timestamp: b.timestamp,
-            size_bytes: b.size_bytes,
-        })
+        .map(|b| BackupDto { path: b.path.display().to_string(), timestamp: b.timestamp, size_bytes: b.size_bytes })
         .collect())
 }
 
@@ -1719,12 +1653,7 @@ fn restore_backup(
 }
 
 #[tauri::command]
-fn delete_backup(
-    game: String,
-    profile_path: String,
-    backup_path: String,
-    state: State<'_, AppState>,
-) -> CmdResult<()> {
+fn delete_backup(game: String, profile_path: String, backup_path: String, state: State<'_, AppState>) -> CmdResult<()> {
     let game = parse_game(&game)?;
     let sii = known_profile(game, &profile_path, &settings_snapshot(&state)?)?;
     profile::delete_backup(&sii, &backup_root(game), Path::new(&backup_path)).map_err(err)
@@ -1787,10 +1716,7 @@ fn read_share_file(path: &Path) -> CmdResult<Vec<u8>> {
 /// Installed version of an active entry: `None` when not installed, an
 /// empty string when installed with an unknown version.
 fn local_version(scanned: &[ScannedMod], matcher: &ActiveModMatcher, name: &str, display_name: &str) -> Option<String> {
-    let probe = ActiveMod {
-        name: name.to_string(),
-        display_name: display_name.to_string(),
-    };
+    let probe = ActiveMod { name: name.to_string(), display_name: display_name.to_string() };
     let m = &scanned[matcher.lookup(&probe)?];
     Some(m.manifest.as_ref().map(|mf| mf.package_version.clone()).unwrap_or_default())
 }
@@ -1822,11 +1748,8 @@ fn export_share(
         let scanned = inner.scans.get(&game).unwrap_or(&empty);
         let matcher = ActiveModMatcher::new(scanned);
         // the file is in profile order: index 0 = bottom of the load order
-        let profile = profile::Profile {
-            dir_name: String::new(),
-            profile_name,
-            active_mods: items.into_iter().rev().collect(),
-        };
+        let profile =
+            profile::Profile { dir_name: String::new(), profile_name, active_mods: items.into_iter().rev().collect() };
         ShareList::from_profile(&profile, game, |a| {
             local_version(scanned, &matcher, &a.name, &a.display_name).filter(|v| !v.is_empty())
         })
@@ -1861,11 +1784,7 @@ fn preview_share(game: String, path: String, state: State<'_, AppState>) -> CmdR
     let matcher = ActiveModMatcher::new(scanned);
     let mut entries = check_share(&share, |e| local_version(scanned, &matcher, &e.name, &e.display_name));
     entries.reverse(); // display order
-    Ok(SharePreview {
-        kind,
-        profile_name: share.profile_name,
-        entries,
-    })
+    Ok(SharePreview { kind, profile_name: share.profile_name, entries })
 }
 
 /// Write the Maps group of the list (display order) as a MapCombo file.
@@ -1898,7 +1817,12 @@ fn export_map_combo(game: String, items: Vec<ActiveMod>, path: String, state: St
 /// Read a MapCombo file and work out the reordered list. Nothing is
 /// changed; the UI applies `order` only when no map is missing.
 #[tauri::command(async)]
-fn preview_map_combo(game: String, items: Vec<ActiveMod>, path: String, state: State<'_, AppState>) -> CmdResult<MapComboPreview> {
+fn preview_map_combo(
+    game: String,
+    items: Vec<ActiveMod>,
+    path: String,
+    state: State<'_, AppState>,
+) -> CmdResult<MapComboPreview> {
     let game = parse_game(&game)?;
     let raw = read_share_file(Path::new(&path))?;
     let combo = share::parse_map_combo(&String::from_utf8_lossy(&raw)).map_err(err)?;
@@ -1915,20 +1839,12 @@ fn preview_map_combo(game: String, items: Vec<ActiveMod>, path: String, state: S
         .iter()
         .filter_map(|e| {
             let local = local_version(scanned, &matcher, &e.name, &e.display_name).filter(|v| !v.is_empty())?;
-            (share::compare_versions(&local, &e.package_version) == Some(std::cmp::Ordering::Less)).then(|| OutdatedMap {
-                name: label(e),
-                local,
-                combo: e.package_version.clone(),
-            })
+            (share::compare_versions(&local, &e.package_version) == Some(std::cmp::Ordering::Less))
+                .then(|| OutdatedMap { name: label(e), local, combo: e.package_version.clone() })
         })
         .collect();
     let order: Vec<String> = items.iter().map(|a| a.name.clone()).collect();
-    Ok(MapComboPreview {
-        count: combo.len(),
-        missing,
-        outdated,
-        order: share::apply_map_combo(&order, &block, &combo),
-    })
+    Ok(MapComboPreview { count: combo.len(), missing, outdated, order: share::apply_map_combo(&order, &block, &combo) })
 }
 
 /// Open a workshop item's Steam page by its numeric id (the subscribe
@@ -2032,11 +1948,7 @@ mod tests {
     fn pins_from_older_versions_are_still_read() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("category_overrides.json");
-        fs::write(
-            &path,
-            br#"{"ETS2": {"old_style": "sound", "new_style": ["truck", "sound"], "empty": []}}"#,
-        )
-        .unwrap();
+        fs::write(&path, br#"{"ETS2": {"old_style": "sound", "new_style": ["truck", "sound"], "empty": []}}"#).unwrap();
         let pins = load_overrides(&path);
         let ets2 = &pins["ETS2"];
         assert_eq!(ets2["old_style"], ["sound"]);

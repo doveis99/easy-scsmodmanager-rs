@@ -148,9 +148,9 @@ impl Label {
             Label::Physics => &["physics"],
             Label::Weather => &["weather_setup", "graphics", "map"],
             Label::Graphics => &["graphics", "weather_setup", "map"],
-            Label::Assets => &[
-                "graphics", "weather_setup", "models", "movers", "walkers", "prefabs", "map", "other", "ui",
-            ],
+            Label::Assets => {
+                &["graphics", "weather_setup", "models", "movers", "walkers", "prefabs", "map", "other", "ui"]
+            }
         }
     }
 
@@ -159,9 +159,7 @@ impl Label {
     /// load-order group as the label's own category.
     pub fn fits(self, category: &str) -> bool {
         self.at_home_in().contains(&category)
-            || self
-                .category()
-                .is_some_and(|own| group_index_for_token(own) == group_index_for_token(category))
+            || self.category().is_some_and(|own| group_index_for_token(own) == group_index_for_token(category))
     }
 
     /// A definition, as opposed to the payload that comes with one.
@@ -575,17 +573,13 @@ const HIGH_SHARE: f32 = 0.8;
 /// Compare the evidence with the categories the manifest declares.
 /// `None` when the content agrees with the manifest or says too little.
 pub fn judge<S: AsRef<str>>(evidence: &Evidence, manifest_categories: &[S]) -> Option<Verdict> {
-    let claims: Vec<String> = canonical_categories(manifest_categories)
-        .into_iter()
-        .filter(|c| c != OTHER)
-        .collect();
+    let claims: Vec<String> = canonical_categories(manifest_categories).into_iter().filter(|c| c != OTHER).collect();
     let definitions = evidence.definitions();
     if definitions < 0.5 {
         return None;
     }
-    let support = |category: &str| -> f32 {
-        ALL_LABELS.iter().filter(|l| l.fits(category)).map(|l| evidence.count(*l)).sum()
-    };
+    let support =
+        |category: &str| -> f32 { ALL_LABELS.iter().filter(|l| l.fits(category)).map(|l| evidence.count(*l)).sum() };
     let categories_for = |judged: &'static str| -> Vec<String> {
         let mut out = vec![judged.to_string()];
         out.extend(claims.iter().filter(|c| c.as_str() != judged && support(c) >= 0.5).cloned());
@@ -629,8 +623,7 @@ pub fn judge<S: AsRef<str>>(evidence: &Evidence, manifest_categories: &[S]) -> O
     }
     let backing = support(claim);
     let unsupported = backing < 0.5;
-    let applied =
-        unsupported && share >= OVERRULE_SHARE && definitions >= OVERRULE_FILES && evidence.is_visible();
+    let applied = unsupported && share >= OVERRULE_SHARE && definitions >= OVERRULE_FILES && evidence.is_visible();
     // a suggestion takes a clear majority that also outweighs whatever
     // backs the claim: one stray UI file in a pack of map assets does not
     let outweighs = label == Label::TruckStruct || evidence.count(label) > backing;

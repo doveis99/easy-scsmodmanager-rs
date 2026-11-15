@@ -161,40 +161,25 @@ fn tokenize(text: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             if !terminated {
-                return Err(Error::SiiParse(format!(
-                    "Unterminated string at line {start_line}"
-                )));
+                return Err(Error::SiiParse(format!("Unterminated string at line {start_line}")));
             }
-            tokens.push(Token {
-                kind: Kind::Str,
-                value: decode_byte_string(chars),
-                line: start_line,
-            });
+            tokens.push(Token { kind: Kind::Str, value: decode_byte_string(chars), line: start_line });
             continue;
         }
         if let Some(kind) = structural(ch) {
-            tokens.push(Token {
-                kind,
-                value: ch.to_string(),
-                line,
-            });
+            tokens.push(Token { kind, value: ch.to_string(), line });
             i += 1;
             continue;
         }
         // identifier-ish: read until whitespace or a structural/comment start
         let start = i;
-        while i < n && !matches!(t[i], ' ' | '\t' | '\r' | '\n' | '{' | '}' | '[' | ']' | ':' | '#')
-        {
+        while i < n && !matches!(t[i], ' ' | '\t' | '\r' | '\n' | '{' | '}' | '[' | ']' | ':' | '#') {
             if t[i] == '/' && i + 1 < n && t[i + 1] == '/' {
                 break;
             }
             i += 1;
         }
-        tokens.push(Token {
-            kind: Kind::Ident,
-            value: t[start..i].iter().collect(),
-            line,
-        });
+        tokens.push(Token { kind: Kind::Ident, value: t[start..i].iter().collect(), line });
     }
     Ok(tokens)
 }
@@ -214,9 +199,7 @@ impl Parser {
     fn parse(&mut self) -> Result<Vec<SiiUnit>> {
         let head = self.consume(Kind::Ident, "Expected 'SiiNunit' header")?;
         if head != "SiiNunit" {
-            return Err(Error::SiiParse(format!(
-                "Expected 'SiiNunit' header (got '{head}')"
-            )));
+            return Err(Error::SiiParse(format!("Expected 'SiiNunit' header (got '{head}')")));
         }
         self.consume(Kind::LBrace, "Expected '{' after SiiNunit")?;
         let mut units = Vec::new();
@@ -263,11 +246,7 @@ impl Parser {
         for (key, by_index) in indexed {
             properties.insert(key, SiiValue::List(by_index.into_values().collect()));
         }
-        Ok(SiiUnit {
-            class,
-            name,
-            properties,
-        })
+        Ok(SiiUnit { class, name, properties })
     }
 
     fn parse_property(&mut self) -> Result<(String, Index, String)> {
@@ -280,24 +259,19 @@ impl Parser {
                 index = Index::Append;
             } else {
                 let raw = self.consume(Kind::Ident, "Expected index inside '[]'")?;
-                let i = raw.parse::<i64>().map_err(|_| {
-                    Error::SiiParse(format!("Array index must be an integer (got '{raw}')"))
-                })?;
+                let i = raw
+                    .parse::<i64>()
+                    .map_err(|_| Error::SiiParse(format!("Array index must be an integer (got '{raw}')")))?;
                 self.consume(Kind::RBrack, "Expected ']' after index")?;
                 index = Index::At(i);
             }
         }
         self.consume(Kind::Colon, &format!("Expected ':' after property '{key}'"))?;
         let Some(tok) = self.tokens.get(self.pos) else {
-            return Err(Error::SiiParse(
-                "Expected property value (reached end of input)".into(),
-            ));
+            return Err(Error::SiiParse("Expected property value (reached end of input)".into()));
         };
         if !matches!(tok.kind, Kind::Ident | Kind::Str) {
-            return Err(Error::SiiParse(format!(
-                "Expected property value (got '{}' at line {})",
-                tok.value, tok.line
-            )));
+            return Err(Error::SiiParse(format!("Expected property value (got '{}' at line {})", tok.value, tok.line)));
         }
         let is_ident = tok.kind == Kind::Ident;
         let mut value = tok.value.clone();
@@ -319,10 +293,7 @@ impl Parser {
             return Err(Error::SiiParse(format!("{message} (reached end of input)")));
         };
         if tok.kind != kind {
-            return Err(Error::SiiParse(format!(
-                "{message} (got '{}' at line {})",
-                tok.value, tok.line
-            )));
+            return Err(Error::SiiParse(format!("{message} (got '{}' at line {})", tok.value, tok.line)));
         }
         self.pos += 1;
         Ok(tok.value.clone())
@@ -399,10 +370,7 @@ mod_package: .package
             profile_name: "Jo"
         } }"#;
         let units = parse_sii(text).unwrap();
-        assert_eq!(
-            units[0].list("active_mods", false),
-            vec!["a|A", "b|B", "c|C"]
-        );
+        assert_eq!(units[0].list("active_mods", false), vec!["a|A", "b|B", "c|C"]);
         assert_eq!(units[0].text("profile_name"), Some("Jo"));
     }
 

@@ -93,10 +93,7 @@ pub fn analyze<S: AsRef<str>>(active_top_first: &[(&str, &[S])]) -> ConflictRepo
                 frequent
                     .entry(active_top_first[i].0.to_string())
                     .or_default()
-                    .push(FrequentFile {
-                        file: path.to_string(),
-                        owners: indices.len(),
-                    });
+                    .push(FrequentFile { file: path.to_string(), owners: indices.len() });
             }
             continue;
         }
@@ -105,18 +102,14 @@ pub fn analyze<S: AsRef<str>>(active_top_first: &[(&str, &[S])]) -> ConflictRepo
         for &i in indices {
             *shared_count.entry(i).or_default() += 1;
             if i != winner {
-                lost.entry(i).or_default().push(LostFile {
-                    file: path.to_string(),
-                    winner: active_top_first[winner].0.to_string(),
-                });
+                lost.entry(i)
+                    .or_default()
+                    .push(LostFile { file: path.to_string(), winner: active_top_first[winner].0.to_string() });
             }
         }
     }
 
-    let mut report = ConflictReport {
-        frequent,
-        ..Default::default()
-    };
+    let mut report = ConflictReport { frequent, ..Default::default() };
     for files in report.frequent.values_mut() {
         files.sort_by(|a, b| a.file.cmp(&b.file));
     }
@@ -126,11 +119,7 @@ pub fn analyze<S: AsRef<str>>(active_top_first: &[(&str, &[S])]) -> ConflictRepo
         report.overrides.insert(
             active_top_first[index].0.to_string(),
             ModOverride {
-                severity: if files.len() == shared_total {
-                    Severity::Full
-                } else {
-                    Severity::Partial
-                },
+                severity: if files.len() == shared_total { Severity::Full } else { Severity::Partial },
                 lost: files,
                 shared_total,
             },
@@ -160,19 +149,13 @@ mod tests {
         let low = &r.overrides["low"];
         assert_eq!(low.severity, Severity::Full);
         assert_eq!(low.shared_total, 1);
-        assert_eq!(
-            low.lost,
-            vec![LostFile { file: "def/x.sii".into(), winner: "top".into() }]
-        );
+        assert_eq!(low.lost, vec![LostFile { file: "def/x.sii".into(), winner: "top".into() }]);
     }
 
     #[test]
     fn partial_when_a_mod_wins_some_and_loses_some() {
-        let r = run(&[
-            ("top", &["def/a.sii"]),
-            ("mid", &["def/a.sii", "def/b.sii"]),
-            ("low", &["def/b.sii", "def/a.sii"]),
-        ]);
+        let r =
+            run(&[("top", &["def/a.sii"]), ("mid", &["def/a.sii", "def/b.sii"]), ("low", &["def/b.sii", "def/a.sii"])]);
         let mid = &r.overrides["mid"];
         assert_eq!(mid.severity, Severity::Partial);
         assert_eq!(mid.lost.len(), 1);
@@ -195,10 +178,7 @@ mod tests {
 
     #[test]
     fn directory_entries_and_duplicates_are_ignored() {
-        let r = run(&[
-            ("a", &["def/", "def/x.sii", "def/x.sii"]),
-            ("b", &["def/", "def/y.sii"]),
-        ]);
+        let r = run(&[("a", &["def/", "def/x.sii", "def/x.sii"]), ("b", &["def/", "def/y.sii"])]);
         assert!(r.overrides.is_empty());
     }
 
@@ -216,8 +196,7 @@ mod tests {
         );
 
         // exactly at the limit it is still a conflict
-        let mods: Vec<(&str, &[&str])> =
-            names[..GENERIC_OWNER_LIMIT].iter().map(|n| (n.as_str(), defs)).collect();
+        let mods: Vec<(&str, &[&str])> = names[..GENERIC_OWNER_LIMIT].iter().map(|n| (n.as_str(), defs)).collect();
         let r = analyze(&mods);
         assert!(r.frequent.is_empty());
         assert_eq!(r.overrides.len(), GENERIC_OWNER_LIMIT - 1);

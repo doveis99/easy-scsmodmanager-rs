@@ -41,8 +41,7 @@ const EXTRA_LENGTH_MASK: u32 = 0xFF;
 const EXTRA_OFFSET_SHIFT: u32 = 16;
 const OFFSET_BASE_MASK: u32 = (1 << EXTRA_OFFSET_SHIFT) - 1;
 
-const PRECODE_PERM: [usize; PRECODE_SYMS] =
-    [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+const PRECODE_PERM: [usize; PRECODE_SYMS] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
 // decode-table sizes (zlib's "enough" worst case for the TABLEBITS above)
 const PRECODE_ENOUGH: usize = 128;
@@ -64,6 +63,7 @@ fn precode_results() -> [u32; PRECODE_SYMS] {
 fn litlen_results() -> [u32; LITLEN_SYMS] {
     // (length base, extra bits) for symbols 256..=287. The last three are
     // GDeflate's long-length symbols: base 3 plus 16 extra bits.
+    #[rustfmt::skip]
     const LENGTHS: [(u32, u32); 32] = [
         (0, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0), (8, 0), (9, 0), (10, 0),
         (11, 1), (13, 1), (15, 1), (17, 1), (19, 2), (23, 2), (27, 2), (31, 2),
@@ -82,6 +82,7 @@ fn litlen_results() -> [u32; LITLEN_SYMS] {
 
 fn offset_results() -> [u32; OFFSET_SYMS] {
     // (offset base, extra bits)
+    #[rustfmt::skip]
     const OFFSETS: [(u32, u32); 32] = [
         (1, 0), (2, 0), (3, 0), (4, 0), (5, 1), (7, 1), (9, 2), (13, 2),
         (17, 3), (25, 3), (33, 4), (49, 4), (65, 5), (97, 5), (129, 6), (193, 6),
@@ -577,15 +578,12 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
         // tile 0 starts at 0; offsets[0] doubles as the last tile's length
         let start = if tile > 0 { offsets[tile] } else { 0 };
         let len = if tile + 1 < num_tiles {
-            offsets[tile + 1]
-                .checked_sub(start)
-                .ok_or_else(|| bad("tile offsets not ascending"))?
+            offsets[tile + 1].checked_sub(start).ok_or_else(|| bad("tile offsets not ascending"))?
         } else {
             offsets[0]
         };
-        let page = input
-            .get(start..start.saturating_add(len))
-            .ok_or_else(|| bad("tile runs past the end of the stream"))?;
+        let page =
+            input.get(start..start.saturating_add(len)).ok_or_else(|| bad("tile runs past the end of the stream"))?;
         let out_idx = tile * TILE_SIZE;
         let avail = TILE_SIZE.min(uncompressed - out_idx);
         Inflater::new(page, &mut out, out_idx, avail, &tables).run()?;

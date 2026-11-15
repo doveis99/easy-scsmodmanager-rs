@@ -23,9 +23,7 @@ pub struct ZipSource {
 
 impl ZipSource {
     pub fn open(path: &Path) -> Result<Self> {
-        Ok(Self {
-            archive: zip::ZipArchive::new(File::open(path)?)?,
-        })
+        Ok(Self { archive: zip::ZipArchive::new(File::open(path)?)? })
     }
 }
 
@@ -49,10 +47,7 @@ impl ModSource for ZipSource {
 /// True when the file ends in a usable ZIP central directory - the
 /// equivalent of Python's `zipfile.is_zipfile` for header-less `.zip` mods.
 pub fn is_zipfile(path: &Path) -> bool {
-    File::open(path)
-        .ok()
-        .and_then(|f| zip::ZipArchive::new(f).ok())
-        .is_some()
+    File::open(path).ok().and_then(|f| zip::ZipArchive::new(f).ok()).is_some()
 }
 
 const ZIP_LOCAL: &[u8] = b"PK\x03\x04";
@@ -121,10 +116,7 @@ impl ModSource for RawZipSource {
     }
 
     fn read_bytes(&mut self, path: &str) -> Result<Vec<u8>> {
-        let e = *self
-            .index
-            .get(path)
-            .ok_or_else(|| Error::NotFound(path.to_string()))?;
+        let e = *self.index.get(path).ok_or_else(|| Error::NotFound(path.to_string()))?;
         if e.comp_size == 0 {
             // streamed entry (data descriptor) - cannot be sliced reliably
             return Err(format_err(format!("no usable compressed size for {path}")));
@@ -163,8 +155,7 @@ mod tests {
 
     fn make_zip(path: &Path, files: &[(&str, &[u8])]) {
         let mut w = zip::ZipWriter::new(File::create(path).unwrap());
-        let opts = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         for (name, data) in files {
             w.start_file(*name, opts).unwrap();
             w.write_all(data).unwrap();

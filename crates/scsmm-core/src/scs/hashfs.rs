@@ -24,8 +24,8 @@ const CITY_METHOD: &[u8] = b"CITY";
 /// Standard SCS top-level directories, used to seed the walk for archives
 /// that omit the root listing.
 const KNOWN_TOP_DIRS: &[&str] = &[
-    "automat", "def", "dlc", "effect", "font", "locale", "map", "material", "model", "model2",
-    "prefab", "prefab2", "sound", "system", "ui", "unit", "vehicle",
+    "automat", "def", "dlc", "effect", "font", "locale", "map", "material", "model", "model2", "prefab", "prefab2",
+    "sound", "system", "ui", "unit", "vehicle",
 ];
 const KNOWN_ROOT_FILES: &[&str] = &[
     "manifest.sii",
@@ -88,8 +88,7 @@ impl HashFsReader {
     pub fn open(path: &Path) -> Result<Self> {
         let mut file = File::open(path)?;
         let mut head = [0u8; 12];
-        file.read_exact(&mut head)
-            .map_err(|_| format_err("not a HashFS archive"))?;
+        file.read_exact(&mut head).map_err(|_| format_err("not a HashFS archive"))?;
         if u32_at(&head, 0) != MAGIC {
             return Err(format_err("not a HashFS archive"));
         }
@@ -103,12 +102,7 @@ impl HashFsReader {
             2 => Self::parse_v2(&mut file)?,
             other => return Err(format_err(format!("Unsupported HashFS version {other}"))),
         };
-        Ok(Self {
-            file,
-            version,
-            salt,
-            entries,
-        })
+        Ok(Self { file, version, salt, entries })
     }
 
     fn parse_v1(file: &mut File) -> Result<HashMap<u64, Entry>> {
@@ -191,12 +185,8 @@ impl HashFsReader {
     ///
     /// [`iter_files`]: HashFsReader::iter_files
     pub fn file_entries(&self) -> Vec<(u64, u32)> {
-        let mut out: Vec<(u64, u32)> = self
-            .entries
-            .iter()
-            .filter(|(_, e)| !e.is_directory)
-            .map(|(hash, e)| (*hash, e.size))
-            .collect();
+        let mut out: Vec<(u64, u32)> =
+            self.entries.iter().filter(|(_, e)| !e.is_directory).map(|(hash, e)| (*hash, e.size)).collect();
         out.sort_unstable();
         out
     }
@@ -218,9 +208,7 @@ impl HashFsReader {
         if !entry.is_image {
             return self.content(entry);
         }
-        let meta = entry
-            .tobj_meta
-            .ok_or_else(|| format_err(format!("texture metadata missing: {hash:016x}")))?;
+        let meta = entry.tobj_meta.ok_or_else(|| format_err(format!("texture metadata missing: {hash:016x}")))?;
         let stored = if entry.is_compressed { entry.compressed_size } else { entry.size };
         let raw = read_at(&mut self.file, entry.offset, stored as usize)?;
         reconstruct_dds(&meta, &raw, entry.is_compressed)
@@ -237,9 +225,7 @@ impl HashFsReader {
             .entry(path)
             .filter(|e| e.is_image)
             .ok_or_else(|| format_err(format!("not a packed texture: {path}")))?;
-        let meta = entry
-            .tobj_meta
-            .ok_or_else(|| format_err(format!("texture metadata missing: {path}")))?;
+        let meta = entry.tobj_meta.ok_or_else(|| format_err(format!("texture metadata missing: {path}")))?;
         let stored = if entry.is_compressed { entry.compressed_size } else { entry.size };
         let raw = read_at(&mut self.file, entry.offset, stored as usize)?;
         reconstruct_dds(&meta, &raw, entry.is_compressed)
@@ -247,16 +233,9 @@ impl HashFsReader {
 
     /// `(subdirectories, files)` named in a directory listing entry.
     pub fn list_dir(&mut self, path: &str) -> Result<(Vec<String>, Vec<String>)> {
-        let entry = self
-            .entry(path)
-            .filter(|e| e.is_directory)
-            .ok_or_else(|| Error::NotFound(path.to_string()))?;
+        let entry = self.entry(path).filter(|e| e.is_directory).ok_or_else(|| Error::NotFound(path.to_string()))?;
         let blob = self.content(entry)?;
-        Ok(if self.version == 1 {
-            parse_listing_v1(&blob)
-        } else {
-            parse_listing_v2(&blob)
-        })
+        Ok(if self.version == 1 { parse_listing_v1(&blob) } else { parse_listing_v2(&blob) })
     }
 
     /// Every file path in the archive (with a leading `/`), walked from the
@@ -291,19 +270,13 @@ impl HashFsReader {
 
 impl ModSource for HashFsReader {
     fn has(&mut self, path: &str) -> bool {
-        self.entry(path)
-            .is_some_and(|e| !e.is_directory && !e.is_image)
+        self.entry(path).is_some_and(|e| !e.is_directory && !e.is_image)
     }
 
     fn read_bytes(&mut self, path: &str) -> Result<Vec<u8>> {
-        let entry = self
-            .entry(path)
-            .filter(|e| !e.is_directory)
-            .ok_or_else(|| Error::NotFound(path.to_string()))?;
+        let entry = self.entry(path).filter(|e| !e.is_directory).ok_or_else(|| Error::NotFound(path.to_string()))?;
         if entry.is_image {
-            return Err(format_err(format!(
-                "packed texture entry not supported: {path}"
-            )));
+            return Err(format_err(format!("packed texture entry not supported: {path}")));
         }
         self.content(entry)
     }
@@ -324,13 +297,7 @@ impl ModSource for HashFsReader {
     fn path_hashes(&mut self) -> Option<Vec<u64>> {
         // a salted archive hashes "<salt><path>": comparable with nothing
         // outside itself
-        (self.salt == 0).then(|| {
-            self.entries
-                .iter()
-                .filter(|(_, e)| !e.is_directory)
-                .map(|(hash, _)| *hash)
-                .collect()
-        })
+        (self.salt == 0).then(|| self.entries.iter().filter(|(_, e)| !e.is_directory).map(|(hash, _)| *hash).collect())
     }
 }
 
@@ -453,21 +420,13 @@ pub(crate) mod testutil {
             let mut parent = String::new();
             for (i, part) in parts.iter().enumerate() {
                 let is_file = i == parts.len() - 1;
-                let line = if is_file {
-                    part.to_string()
-                } else {
-                    format!("*{part}")
-                };
+                let line = if is_file { part.to_string() } else { format!("*{part}") };
                 let listing = dirs.entry(parent.clone()).or_default();
                 if !listing.contains(&line) {
                     listing.push(line);
                 }
                 if !is_file {
-                    parent = if parent.is_empty() {
-                        part.to_string()
-                    } else {
-                        format!("{parent}/{part}")
-                    };
+                    parent = if parent.is_empty() { part.to_string() } else { format!("{parent}/{part}") };
                     dirs.entry(parent.clone()).or_default();
                 }
             }
@@ -476,11 +435,7 @@ pub(crate) mod testutil {
         // (hash, flags, stored bytes, real size)
         let mut blobs: Vec<(u64, u32, Vec<u8>, u32)> = Vec::new();
         for (path, content, compress) in files {
-            let stored = if *compress {
-                zlib(content)
-            } else {
-                content.to_vec()
-            };
+            let stored = if *compress { zlib(content) } else { content.to_vec() };
             let flags = if *compress { 0x2 } else { 0 };
             blobs.push((hash_path(path, salt), flags, stored, content.len() as u32));
         }
@@ -518,9 +473,16 @@ pub(crate) mod testutil {
     }
 
     pub enum V2Content<'a> {
-        Plain { data: &'a [u8], compress: bool },
+        Plain {
+            data: &'a [u8],
+            compress: bool,
+        },
         /// A packed texture: its 12-byte metadata and GDeflate payload.
-        Image { meta: [u8; 12], payload: &'a [u8], raw_size: u32 },
+        Image {
+            meta: [u8; 12],
+            payload: &'a [u8],
+            raw_size: u32,
+        },
     }
 
     /// Minimal HashFS v2 archive. Directory listings are derived.
@@ -641,10 +603,7 @@ mod tests {
         assert!(!r.has("def")); // directories are not files
         assert!(!r.has("nope.txt"));
         assert_eq!(r.read_bytes("manifest.sii").unwrap(), manifest);
-        assert_eq!(
-            r.iter_files(),
-            vec!["/def/vehicle/physics.sii", "/manifest.sii", "/map/europe.mbd"]
-        );
+        assert_eq!(r.iter_files(), vec!["/def/vehicle/physics.sii", "/manifest.sii", "/map/europe.mbd"]);
     }
 
     #[test]
@@ -701,10 +660,7 @@ mod tests {
         let mut r = HashFsReader::open(&path).unwrap();
         assert_eq!(r.read_bytes("manifest.sii").unwrap(), manifest);
         assert_eq!(r.read_bytes("def/a.sii").unwrap(), b"plain");
-        assert_eq!(
-            r.iter_files(),
-            vec!["/def/a.sii", "/manifest.sii", "/material/ui/tex0.tobj"]
-        );
+        assert_eq!(r.iter_files(), vec!["/def/a.sii", "/manifest.sii", "/material/ui/tex0.tobj"]);
         // the texture is not a plain file...
         assert!(r.is_image_entry("material/ui/tex0.tobj"));
         assert!(!r.is_image_entry("manifest.sii"));

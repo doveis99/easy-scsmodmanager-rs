@@ -41,9 +41,7 @@ pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
         }
         v.split('.')
             .map(|seg| {
-                (!seg.is_empty() && seg.bytes().all(|c| c.is_ascii_digit()))
-                    .then(|| seg.parse::<u64>().ok())
-                    .flatten()
+                (!seg.is_empty() && seg.bytes().all(|c| c.is_ascii_digit())).then(|| seg.parse::<u64>().ok()).flatten()
             })
             .collect()
     }
@@ -92,11 +90,7 @@ struct ShareFile<'a> {
 impl ShareList {
     /// Snapshot a profile's active list. `version_of` returns the locally
     /// installed version for an active entry, or `None` when unknown.
-    pub fn from_profile(
-        profile: &Profile,
-        game: Game,
-        version_of: impl Fn(&ActiveMod) -> Option<String>,
-    ) -> Self {
+    pub fn from_profile(profile: &Profile, game: Game, version_of: impl Fn(&ActiveMod) -> Option<String>) -> Self {
         Self {
             game,
             profile_name: profile.profile_name.clone(),
@@ -132,22 +126,14 @@ impl ShareList {
         if data["format"].as_str() != Some(MODSHARE_FORMAT) {
             return Err(format_err("not a ModShare file"));
         }
-        let version = data["version"]
-            .as_u64()
-            .filter(|v| *v >= 1)
-            .ok_or_else(|| format_err("bad version field"))?;
+        let version = data["version"].as_u64().filter(|v| *v >= 1).ok_or_else(|| format_err("bad version field"))?;
         if version > MODSHARE_VERSION {
             return Err(format_err(format!(
                 "this file was written by a newer version (format {version}, supported {MODSHARE_VERSION})"
             )));
         }
-        let game = data["game"]
-            .as_str()
-            .and_then(Game::parse)
-            .ok_or_else(|| format_err("unknown game"))?;
-        let mods = data["mods"]
-            .as_array()
-            .ok_or_else(|| format_err("mods is not a list"))?;
+        let game = data["game"].as_str().and_then(Game::parse).ok_or_else(|| format_err("unknown game"))?;
+        let mods = data["mods"].as_array().ok_or_else(|| format_err("mods is not a list"))?;
         let entries = mods
             .iter()
             .map(|raw| {
@@ -162,11 +148,7 @@ impl ShareList {
             serde_json::Value::String(s) => s.clone(),
             _ => return Err(format_err("profile_name must be a string")),
         };
-        Ok(Self {
-            game,
-            profile_name,
-            entries,
-        })
+        Ok(Self { game, profile_name, entries })
     }
 }
 
@@ -215,9 +197,7 @@ pub fn check_share(share: &ShareList, installed: impl Fn(&ShareEntry) -> Option<
                 (None, None) => ShareStatus::MissingLocal,
             };
             let local_version = local.filter(|v| !v.is_empty());
-            let outdated = local_version
-                .as_deref()
-                .and_then(|l| compare_versions(l, &entry.package_version))
+            let outdated = local_version.as_deref().and_then(|l| compare_versions(l, &entry.package_version))
                 == Some(Ordering::Less);
             ShareCheck {
                 name: entry.name.clone(),
@@ -255,18 +235,14 @@ struct MapComboFile<'a> {
 
 /// Render a maps block (top to bottom) as a shareable file.
 pub fn serialize_map_combo(entries: &[MapComboEntry]) -> String {
-    serde_json::to_string_pretty(&MapComboFile {
-        format: MAPCOMBO_FORMAT,
-        version: MAPCOMBO_VERSION,
-        maps: entries,
-    })
-    .expect("plain data serialises")
+    serde_json::to_string_pretty(&MapComboFile { format: MAPCOMBO_FORMAT, version: MAPCOMBO_VERSION, maps: entries })
+        .expect("plain data serialises")
 }
 
 /// Parse a MapCombo file (v1 or v2).
 pub fn parse_map_combo(text: &str) -> Result<Vec<MapComboEntry>> {
-    let data: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
-        .map_err(|e| format_err(format!("not JSON: {e}")))?;
+    let data: serde_json::Value =
+        serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| format_err(format!("not JSON: {e}")))?;
     if data["format"].as_str() != Some(MAPCOMBO_FORMAT) {
         return Err(format_err("not a MapCombo file"));
     }
@@ -291,17 +267,11 @@ pub fn parse_map_combo(text: &str) -> Result<Vec<MapComboEntry>> {
 /// and follow, so a local map is never dropped. Every non-map stays where
 /// it was: the reordered run goes in at the position of the first map.
 pub fn apply_map_combo(order: &[String], maps_block: &HashSet<String>, combo: &[MapComboEntry]) -> Vec<String> {
-    let mut ordered: Vec<&String> = combo
-        .iter()
-        .filter_map(|e| order.iter().find(|n| **n == e.name && maps_block.contains(*n)))
-        .collect();
+    let mut ordered: Vec<&String> =
+        combo.iter().filter_map(|e| order.iter().find(|n| **n == e.name && maps_block.contains(*n))).collect();
     ordered.dedup();
     let placed: HashSet<&String> = ordered.iter().copied().collect();
-    ordered.extend(
-        order
-            .iter()
-            .filter(|n| maps_block.contains(*n) && !placed.contains(n)),
-    );
+    ordered.extend(order.iter().filter(|n| maps_block.contains(*n) && !placed.contains(n)));
 
     let mut result: Vec<String> = Vec::with_capacity(order.len());
     let mut inserted = false;
@@ -434,7 +404,11 @@ mod tests {
     #[test]
     fn mapcombo_round_trip_and_v1() {
         let combo = vec![
-            MapComboEntry { name: "promods-def".into(), display_name: "ProMods Def".into(), package_version: "2.70".into() },
+            MapComboEntry {
+                name: "promods-def".into(),
+                display_name: "ProMods Def".into(),
+                package_version: "2.70".into(),
+            },
             MapComboEntry { name: "rusmap".into(), display_name: "RusMap".into(), package_version: String::new() },
         ];
         let text = serialize_map_combo(&combo);
@@ -449,19 +423,14 @@ mod tests {
 
     #[test]
     fn map_combo_reorders_only_the_maps_block() {
-        let order: Vec<String> = ["sound", "truck", "map_c", "map_a", "map_b", "map_local"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let order: Vec<String> =
+            ["sound", "truck", "map_c", "map_a", "map_b", "map_local"].iter().map(|s| s.to_string()).collect();
         let block: HashSet<String> = order.iter().filter(|n| n.starts_with("map_")).cloned().collect();
         let combo: Vec<MapComboEntry> = ["map_a", "map_b", "map_not_installed", "map_c"]
             .iter()
             .map(|n| MapComboEntry { name: n.to_string(), ..Default::default() })
             .collect();
-        assert_eq!(
-            apply_map_combo(&order, &block, &combo),
-            ["sound", "truck", "map_a", "map_b", "map_c", "map_local"]
-        );
+        assert_eq!(apply_map_combo(&order, &block, &combo), ["sound", "truck", "map_a", "map_b", "map_c", "map_local"]);
         // a combo naming a non-map never moves it
         let combo2 = vec![MapComboEntry { name: "truck".into(), ..Default::default() }];
         assert_eq!(apply_map_combo(&order, &block, &combo2), order);

@@ -21,10 +21,7 @@ pub const GROUPS: &[LoadOrderGroup] = &[
     LoadOrderGroup { id: "graphics_weather", tokens: &["graphics", "weather_setup"] },
     LoadOrderGroup { id: "sound", tokens: &["sound"] },
     LoadOrderGroup { id: "physics", tokens: &["physics"] },
-    LoadOrderGroup {
-        id: "ui_other",
-        tokens: &["ui", "other", "models", "movers", "walkers", "prefabs"],
-    },
+    LoadOrderGroup { id: "ui_other", tokens: &["ui", "other", "models", "movers", "walkers", "prefabs"] },
     LoadOrderGroup { id: "tuning_interior", tokens: &["tuning_parts", "interior"] },
     LoadOrderGroup { id: "ai_traffic", tokens: &["ai_traffic"] },
     LoadOrderGroup { id: "cargo", tokens: &["cargo_pack"] },
@@ -39,10 +36,7 @@ const UI_OTHER_INDEX: usize = 4;
 /// Group index for a category token; unmapped tokens go to `ui_other`,
 /// never to `map_base`.
 pub fn group_index_for_token(token: &str) -> usize {
-    GROUPS
-        .iter()
-        .position(|g| g.tokens.contains(&token))
-        .unwrap_or(UI_OTHER_INDEX)
+    GROUPS.iter().position(|g| g.tokens.contains(&token)).unwrap_or(UI_OTHER_INDEX)
 }
 
 pub fn group_index_for_id(group_id: &str) -> Option<usize> {
@@ -68,10 +62,7 @@ pub const DEFAULT_MAP_BASE_NAMES: &[&str] = &[
 
 pub fn is_map_base<S: AsRef<str>>(mod_name: &str, display_name: &str, names: &[S]) -> bool {
     let haystack = format!("{mod_name}\n{display_name}").to_lowercase();
-    names
-        .iter()
-        .map(|f| f.as_ref())
-        .any(|frag| !frag.is_empty() && haystack.contains(&frag.to_lowercase()))
+    names.iter().map(|f| f.as_ref()).any(|frag| !frag.is_empty() && haystack.contains(&frag.to_lowercase()))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -101,11 +92,7 @@ pub fn build_rows<S: AsRef<str>>(tokens: &[S]) -> Vec<Row> {
             }
             current = g;
         }
-        rows.push(Row::Mod {
-            index,
-            misplaced: g < current,
-            expected_group_id: GROUPS[g].id,
-        });
+        rows.push(Row::Mod { index, misplaced: g < current, expected_group_id: GROUPS[g].id });
     }
     for group in &GROUPS[current + 1..] {
         rows.push(Row::Spacer { group_id: group.id });
@@ -154,10 +141,7 @@ pub fn auto_sort_preserving<S: AsRef<str>>(tokens: &[S], keep_above: &[(usize, u
     let mut order = Vec::with_capacity(n);
     for _ in 0..n {
         // n is a load order (tens of mods): a linear scan beats a heap here
-        let Some(next) = (0..n)
-            .filter(|&i| !placed[i] && blockers[i] == 0)
-            .min_by_key(|&i| (groups[i], i))
-        else {
+        let Some(next) = (0..n).filter(|&i| !placed[i] && blockers[i] == 0).min_by_key(|&i| (groups[i], i)) else {
             break; // unreachable: every edge goes from a lower to a higher index
         };
         placed[next] = true;
@@ -171,10 +155,7 @@ pub fn auto_sort_preserving<S: AsRef<str>>(tokens: &[S], keep_above: &[(usize, u
 
 /// Number of mods [`build_rows`] would flag as misplaced.
 pub fn misplaced_count<S: AsRef<str>>(tokens: &[S]) -> usize {
-    build_rows(tokens)
-        .iter()
-        .filter(|r| matches!(r, Row::Mod { misplaced: true, .. }))
-        .count()
+    build_rows(tokens).iter().filter(|r| matches!(r, Row::Mod { misplaced: true, .. })).count()
 }
 
 #[cfg(test)]
@@ -208,16 +189,11 @@ mod tests {
         let mods: Vec<_> = rows
             .iter()
             .filter_map(|r| match r {
-                Row::Mod { index, misplaced, expected_group_id } => {
-                    Some((*index, *misplaced, *expected_group_id))
-                }
+                Row::Mod { index, misplaced, expected_group_id } => Some((*index, *misplaced, *expected_group_id)),
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            mods,
-            vec![(0, false, "sound"), (1, false, "trucks"), (2, true, "sound")]
-        );
+        assert_eq!(mods, vec![(0, false, "sound"), (1, false, "trucks"), (2, true, "sound")]);
         assert_eq!(misplaced_count(&["sound", "truck", "sound"]), 1);
     }
 
@@ -262,10 +238,8 @@ mod tests {
         }
         // sorting again changes nothing
         let sorted: Vec<&str> = order.iter().map(|&i| tokens[i]).collect();
-        let again_keep: Vec<(usize, usize)> = [(0, 2), (1, 3), (3, 4), (5, 7), (2, 7), (0, 8)]
-            .iter()
-            .map(|&(u, l)| (pos(u), pos(l)))
-            .collect();
+        let again_keep: Vec<(usize, usize)> =
+            [(0, 2), (1, 3), (3, 4), (5, 7), (2, 7), (0, 8)].iter().map(|&(u, l)| (pos(u), pos(l))).collect();
         assert_eq!(auto_sort_preserving(&sorted, &again_keep), (0..tokens.len()).collect::<Vec<_>>());
     }
 

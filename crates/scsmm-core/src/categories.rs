@@ -10,24 +10,8 @@ pub const MAP: &str = "map";
 
 /// Fixed order as the in-game mod manager presents them.
 pub const OFFICIAL_CATEGORIES: &[&str] = &[
-    "truck",
-    "trailer",
-    "interior",
-    "tuning_parts",
-    "ai_traffic",
-    "sound",
-    "paint_job",
-    "cargo_pack",
-    "map",
-    "ui",
-    "weather_setup",
-    "physics",
-    "graphics",
-    "models",
-    "movers",
-    "walkers",
-    "prefabs",
-    OTHER,
+    "truck", "trailer", "interior", "tuning_parts", "ai_traffic", "sound", "paint_job", "cargo_pack", "map", "ui",
+    "weather_setup", "physics", "graphics", "models", "movers", "walkers", "prefabs", OTHER,
 ];
 
 pub fn is_official(token: &str) -> bool {
@@ -42,11 +26,7 @@ pub fn is_official(token: &str) -> bool {
 pub fn canonical_categories<S: AsRef<str>>(raw: &[S]) -> Vec<String> {
     let mut result: Vec<String> = Vec::new();
     for tag in raw {
-        let token = if is_official(tag.as_ref()) {
-            tag.as_ref()
-        } else {
-            OTHER
-        };
+        let token = if is_official(tag.as_ref()) { tag.as_ref() } else { OTHER };
         if !result.iter().any(|t| t == token) {
             result.push(token.to_string());
         }
@@ -98,14 +78,7 @@ pub fn effective_categories<S: AsRef<str>, P: AsRef<str>, J: AsRef<str>>(
 /// trailer and AI defs, and sound/interior/tuning mods all overwrite
 /// `def/vehicle/truck/` because they modify trucks.
 pub fn content_category<S: AsRef<str>>(def_files: &[S]) -> Option<&'static str> {
-    def_files
-        .iter()
-        .any(|p| {
-            p.as_ref()
-                .trim_start_matches('/')
-                .starts_with("def/vehicle/physics")
-        })
-        .then_some("physics")
+    def_files.iter().any(|p| p.as_ref().trim_start_matches('/').starts_with("def/vehicle/physics")).then_some("physics")
 }
 
 /// True if any path is a compiled map descriptor (`.mbd`) directly under
@@ -120,9 +93,7 @@ pub fn contains_map<S: AsRef<str>>(paths: &[S]) -> bool {
         dir.eq_ignore_ascii_case("map")
             && !file.contains('/')
             && file.len() > 4
-            && file
-                .get(file.len() - 4..)
-                .is_some_and(|ext| ext.eq_ignore_ascii_case(".mbd"))
+            && file.get(file.len() - 4..).is_some_and(|ext| ext.eq_ignore_ascii_case(".mbd"))
     })
 }
 

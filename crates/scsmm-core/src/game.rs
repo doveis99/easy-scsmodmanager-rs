@@ -104,21 +104,11 @@ pub fn windows_documents_root() -> PathBuf {
 
 fn native_documents(game: Game) -> (PathBuf, InstallKind) {
     if cfg!(windows) {
-        (
-            windows_documents_root().join(game.directory_name()),
-            InstallKind::Windows,
-        )
+        (windows_documents_root().join(game.directory_name()), InstallKind::Windows)
     } else if cfg!(target_os = "macos") {
-        (
-            home_dir()
-                .join("Library/Application Support")
-                .join(game.directory_name()),
-            InstallKind::Macos,
-        )
+        (home_dir().join("Library/Application Support").join(game.directory_name()), InstallKind::Macos)
     } else {
-        let base = env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home_dir().join(".local/share"));
+        let base = env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home_dir().join(".local/share"));
         (base.join(game.directory_name()), InstallKind::LinuxNative)
     }
 }
@@ -135,19 +125,13 @@ fn workshop_dir_path(steam_library: &Path, game: Game) -> PathBuf {
 
 /// First existing Workshop content dir for the game across Steam libraries.
 pub fn detect_workshop_dir(game: Game, steam_libraries: &[PathBuf]) -> Option<PathBuf> {
-    steam_libraries
-        .iter()
-        .map(|lib| workshop_dir_path(lib, game))
-        .find(|p| p.is_dir())
+    steam_libraries.iter().map(|lib| workshop_dir_path(lib, game)).find(|p| p.is_dir())
 }
 
 /// The game's own install directory (`steamapps/common/<game>`, the one
 /// holding base.scs and the `dlc_*.scs` files).
 pub fn find_game_install_dir(game: Game, steam_libraries: &[PathBuf]) -> Option<PathBuf> {
-    steam_libraries
-        .iter()
-        .map(|lib| sub(lib, "steamapps/common").join(game.directory_name()))
-        .find(|p| p.is_dir())
+    steam_libraries.iter().map(|lib| sub(lib, "steamapps/common").join(game.directory_name())).find(|p| p.is_dir())
 }
 
 /// Every existing install for the game.
@@ -165,8 +149,7 @@ pub fn detect_game_installs(game: Game, steam_libraries: &[PathBuf]) -> Vec<Game
     if cfg!(target_os = "linux") {
         for lib in steam_libraries {
             let prefix = sub(lib, "steamapps/compatdata").join(game.app_id().to_string());
-            let proton_docs =
-                sub(&prefix, "pfx/drive_c/users/steamuser/Documents").join(game.directory_name());
+            let proton_docs = sub(&prefix, "pfx/drive_c/users/steamuser/Documents").join(game.directory_name());
             if !proton_docs.is_dir() {
                 continue;
             }
@@ -185,10 +168,7 @@ pub fn detect_game_installs(game: Game, steam_libraries: &[PathBuf]) -> Vec<Game
 /// Convenience: discover Steam libraries, then the installs of every game.
 pub fn detect_all_installs() -> Vec<GameInstall> {
     let libs = discover_steam_libraries();
-    Game::ALL
-        .into_iter()
-        .flat_map(|g| detect_game_installs(g, &libs))
-        .collect()
+    Game::ALL.into_iter().flat_map(|g| detect_game_installs(g, &libs)).collect()
 }
 
 /// A manual install built from a user-set documents dir. Workshop is still
@@ -224,10 +204,8 @@ pub fn read_game_version(documents_dir: &Path) -> Option<String> {
         }
         let line = String::from_utf8_lossy(&buf);
         if let Some(pos) = line.find(MARKER) {
-            let version: String = line[pos + MARKER.len()..]
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '.')
-                .collect();
+            let version: String =
+                line[pos + MARKER.len()..].chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
             if version.starts_with(|c: char| c.is_ascii_digit()) {
                 return Some(version);
             }
@@ -283,12 +261,7 @@ mod tests {
 
     #[test]
     fn manual_install_keeps_pinned_workshop() {
-        let inst = install_for_overrides(
-            Game::Ats,
-            PathBuf::from("X:/docs"),
-            Some(PathBuf::from("Y:/ws")),
-            &[],
-        );
+        let inst = install_for_overrides(Game::Ats, PathBuf::from("X:/docs"), Some(PathBuf::from("Y:/ws")), &[]);
         assert_eq!(inst.kind, InstallKind::Manual);
         assert_eq!(inst.workshop_dir, Some(PathBuf::from("Y:/ws")));
         assert_eq!(inst.mod_dir(), PathBuf::from("X:/docs").join("mod"));

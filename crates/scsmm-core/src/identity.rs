@@ -15,10 +15,7 @@ pub const WORKSHOP_NAME_PREFIX: &str = "mod_workshop_package.";
 
 /// Workshop published-file-id for `.../workshop/content/<appid>/<id>/...`.
 pub fn workshop_id_for_path(path: &Path) -> Option<String> {
-    let parts: Vec<String> = path
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
+    let parts: Vec<String> = path.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
     if !parts.iter().any(|p| p == "workshop") {
         return None;
     }
@@ -28,9 +25,7 @@ pub fn workshop_id_for_path(path: &Path) -> Option<String> {
 }
 
 fn stem(path: &Path) -> String {
-    path.file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default()
+    path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// The name this mod takes in `active_mods[]`. Workshop mods become
@@ -73,9 +68,7 @@ impl ActiveModMatcher {
         for (i, sm) in scanned.iter().enumerate() {
             m.by_stem.entry(stem(&sm.path).to_lowercase()).or_insert(i);
             if let Some(parent) = sm.path.parent().and_then(|p| p.file_name()) {
-                m.by_parent
-                    .entry(parent.to_string_lossy().to_lowercase())
-                    .or_insert(i);
+                m.by_parent.entry(parent.to_string_lossy().to_lowercase()).or_insert(i);
             }
             if let Some(id) = workshop_id_for_path(&sm.path) {
                 m.by_workshop_id.entry(id).or_insert(i);
@@ -95,17 +88,13 @@ impl ActiveModMatcher {
         if let Some(&i) = self.by_stem.get(&name).or_else(|| self.by_parent.get(&name)) {
             return Some(i);
         }
-        if let Some(&i) = workshop_id_from_active_name(&active.name)
-            .and_then(|id| self.by_workshop_id.get(&id))
-        {
+        if let Some(&i) = workshop_id_from_active_name(&active.name).and_then(|id| self.by_workshop_id.get(&id)) {
             return Some(i);
         }
         if active.display_name.is_empty() {
             return None;
         }
-        self.by_display_name
-            .get(&active.display_name.to_lowercase())
-            .copied()
+        self.by_display_name.get(&active.display_name.to_lowercase()).copied()
     }
 }
 
@@ -119,10 +108,7 @@ mod tests {
         let p = PathBuf::from("D:/Steam/steamapps/workshop/content/227300/978025490/universal.scs");
         assert_eq!(workshop_id_for_path(&p).as_deref(), Some("978025490"));
         assert_eq!(mod_name_for_path(&p), "mod_workshop_package.000000003A4B7C12");
-        assert_eq!(
-            workshop_id_from_active_name("mod_workshop_package.000000003A4B7C12").as_deref(),
-            Some("978025490")
-        );
+        assert_eq!(workshop_id_from_active_name("mod_workshop_package.000000003A4B7C12").as_deref(), Some("978025490"));
     }
 
     #[test]

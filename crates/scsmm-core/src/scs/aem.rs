@@ -74,10 +74,7 @@ impl ModSource for AemSource {
     }
 
     fn read_bytes(&mut self, path: &str) -> Result<Vec<u8>> {
-        let (start, end) = *self
-            .index
-            .get(path)
-            .ok_or_else(|| Error::NotFound(path.to_string()))?;
+        let (start, end) = *self.index.get(path).ok_or_else(|| Error::NotFound(path.to_string()))?;
         let content = &self.map[start..end];
         match inflate_raw(content) {
             Ok(out) if !out.is_empty() => Ok(out),
@@ -120,10 +117,7 @@ mod tests {
         let mut a = AemSource::open(&path).unwrap();
         assert_eq!(a.list_files(), vec!["manifest.sii", "icon.jpg"]);
         assert_eq!(a.read_bytes("manifest.sii").unwrap(), manifest);
-        assert_eq!(
-            a.read_bytes("icon.jpg").unwrap(),
-            vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3]
-        );
+        assert_eq!(a.read_bytes("icon.jpg").unwrap(), vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3]);
         assert!(a.read_bytes("missing").is_err());
     }
 }

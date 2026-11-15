@@ -42,12 +42,7 @@ struct Args {
 }
 
 fn parse_args(rest: &[String]) -> Result<Args, String> {
-    let mut args = Args {
-        game: Game::Ets2,
-        profile: None,
-        sorted: false,
-        all: false,
-    };
+    let mut args = Args { game: Game::Ets2, profile: None, sorted: false, all: false };
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -161,16 +156,15 @@ fn cmd_classify(args: &Args) -> Result<(), String> {
         let verdict = m.verdict();
         let suggestion = m.suggested_category(&[]);
         let auto = m.effective_categories(&[]);
-        let overruled = verdict.as_ref().is_some_and(|v| v.applied && auto.first().map(String::as_str) == Some(v.category));
+        let overruled =
+            verdict.as_ref().is_some_and(|v| v.applied && auto.first().map(String::as_str) == Some(v.category));
         applied += usize::from(overruled);
         suggested += usize::from(suggestion.is_some());
         if !args.all && !overruled && suggestion.is_none() {
             continue;
         }
-        let title = m
-            .workshop_id()
-            .and_then(|id| titles.title(&id).map(str::to_string))
-            .unwrap_or_else(|| m.display_name());
+        let title =
+            m.workshop_id().and_then(|id| titles.title(&id).map(str::to_string)).unwrap_or_else(|| m.display_name());
         let manifest = m.manifest.as_ref().map(|x| x.categories.join(",")).unwrap_or_default();
         println!("{title}");
         print!("    manifest: {:<22} auto: {}", if manifest.is_empty() { "-" } else { &manifest }, auto.join(","));
@@ -200,14 +194,13 @@ fn cmd_classify(args: &Args) -> Result<(), String> {
             println!("    {}", signals.join(" | "));
         }
         if e.hidden > 0 {
-            println!("    locked: {} unnamed files, {} of {} looked into could be read", e.hidden, e.hidden_read, e.hidden_tried);
+            println!(
+                "    locked: {} unnamed files, {} of {} looked into could be read",
+                e.hidden, e.hidden_read, e.hidden_tried
+            );
         }
     }
-    println!(
-        "\n{} mods in {:.2?}: {applied} recategorised from content, {suggested} suggestions",
-        mods.len(),
-        elapsed
-    );
+    println!("\n{} mods in {:.2?}: {applied} recategorised from content, {suggested} suggestions", mods.len(), elapsed);
     Ok(())
 }
 
@@ -226,20 +219,15 @@ fn cmd_profiles(args: &Args) -> Result<(), String> {
 fn cmd_order(args: &Args) -> Result<(), String> {
     let libs = steam::discover_steam_libraries();
     let install = install_for(args.game, &libs)?;
-    let profiles: Vec<_> = profile::discover_profiles(&install)
-        .into_iter()
-        .filter_map(|sii| profile::read_profile(&sii).ok())
-        .collect();
+    let profiles: Vec<_> =
+        profile::discover_profiles(&install).into_iter().filter_map(|sii| profile::read_profile(&sii).ok()).collect();
     let chosen = match &args.profile {
         Some(name) => profiles
             .iter()
             .find(|p| p.profile_name.eq_ignore_ascii_case(name))
             .ok_or_else(|| format!("no profile named '{name}'"))?,
         // default: the profile with the most active mods
-        None => profiles
-            .iter()
-            .max_by_key(|p| p.active_mods.len())
-            .ok_or("no profiles found")?,
+        None => profiles.iter().max_by_key(|p| p.active_mods.len()).ok_or("no profiles found")?,
     };
 
     let mods = scan(&install, &libs);
@@ -278,11 +266,7 @@ fn cmd_order(args: &Args) -> Result<(), String> {
                 let a = display[index];
                 let label = if a.display_name.is_empty() { &a.name } else { &a.display_name };
                 let missing = if matcher.lookup(a).is_none() { "  [not installed]" } else { "" };
-                let flag = if misplaced {
-                    format!("  <- belongs in {expected_group_id}")
-                } else {
-                    String::new()
-                };
+                let flag = if misplaced { format!("  <- belongs in {expected_group_id}") } else { String::new() };
                 println!("    {label}{missing}{flag}");
             }
         }

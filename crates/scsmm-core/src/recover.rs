@@ -145,16 +145,10 @@ pub fn recover_names(
 ) -> Recovery {
     let entries = reader.file_entries();
     // hash -> name of every file whose path is known so far
-    let mut known: HashMap<u64, String> = listed
-        .iter()
-        .map(|p| p.trim_start_matches('/'))
-        .map(|p| (reader.hash_of(p), p.to_string()))
-        .collect();
-    let mut unnamed: HashSet<u64> = entries
-        .iter()
-        .map(|(hash, _)| *hash)
-        .filter(|hash| !known.contains_key(hash))
-        .collect();
+    let mut known: HashMap<u64, String> =
+        listed.iter().map(|p| p.trim_start_matches('/')).map(|p| (reader.hash_of(p), p.to_string())).collect();
+    let mut unnamed: HashSet<u64> =
+        entries.iter().map(|(hash, _)| *hash).filter(|hash| !known.contains_key(hash)).collect();
     let mut recovery = Recovery::default();
     if unnamed.is_empty() {
         return recovery;
@@ -289,12 +283,7 @@ pub fn sniff_extension(data: &[u8]) -> &'static str {
         "tobj"
     } else if text_start.starts_with(b"material") || text_start.starts_with(b"effect") {
         "mat"
-    } else if !data.is_empty()
-        && text_start
-            .iter()
-            .take(512)
-            .all(|b| b.is_ascii_graphic() || b.is_ascii_whitespace())
-    {
+    } else if !data.is_empty() && text_start.iter().take(512).all(|b| b.is_ascii_graphic() || b.is_ascii_whitespace()) {
         "txt"
     } else {
         "bin"

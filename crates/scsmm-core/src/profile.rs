@@ -45,14 +45,8 @@ impl ActiveMod {
     /// contain pipes themselves, so only the first one splits.
     pub fn parse(raw: &str) -> Self {
         match raw.split_once('|') {
-            Some((name, display)) => Self {
-                name: name.to_string(),
-                display_name: display.to_string(),
-            },
-            None => Self {
-                name: raw.to_string(),
-                display_name: String::new(),
-            },
+            Some((name, display)) => Self { name: name.to_string(), display_name: display.to_string() },
+            None => Self { name: raw.to_string(), display_name: String::new() },
         }
     }
 }
@@ -97,28 +91,16 @@ pub fn read_profile(profile_sii_path: &Path) -> Result<Profile> {
             .unwrap_or_default(),
     );
     Ok(Profile {
-        profile_name: unit
-            .text("profile_name")
-            .map_or_else(|| dir_name.clone(), str::to_string),
+        profile_name: unit.text("profile_name").map_or_else(|| dir_name.clone(), str::to_string),
         // `active_mods` is just the count scalar when there are no entries
-        active_mods: unit
-            .list("active_mods", false)
-            .iter()
-            .map(|raw| ActiveMod::parse(raw))
-            .collect(),
+        active_mods: unit.list("active_mods", false).iter().map(|raw| ActiveMod::parse(raw)).collect(),
         dir_name,
     })
 }
 
 fn subdirs_sorted(dir: &Path) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut dirs: Vec<PathBuf> =
+        fs::read_dir(dir).map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()).unwrap_or_default();
     dirs.sort();
     dirs
 }
@@ -129,19 +111,13 @@ fn steam_userdata_profile_dirs(app_id: u32) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for steam in find_steam_installs() {
         for user_dir in subdirs_sorted(&steam.join("userdata")) {
-            let is_user_id = user_dir
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().bytes().all(|b| b.is_ascii_digit()));
+            let is_user_id =
+                user_dir.file_name().is_some_and(|n| n.to_string_lossy().bytes().all(|b| b.is_ascii_digit()));
             if !is_user_id {
                 continue;
             }
             let remote = user_dir.join(app_id.to_string()).join("remote");
-            out.extend(
-                PROFILE_DIRECTORY_NAMES
-                    .iter()
-                    .map(|sub| remote.join(sub))
-                    .filter(|p| p.is_dir()),
-            );
+            out.extend(PROFILE_DIRECTORY_NAMES.iter().map(|sub| remote.join(sub)).filter(|p| p.is_dir()));
         }
     }
     out
@@ -151,10 +127,7 @@ fn steam_userdata_profile_dirs(app_id: u32) -> Vec<PathBuf> {
 /// profile mirrored under several roots is returned once, keyed by its hex
 /// directory name (the first root wins).
 pub fn discover_profiles(install: &GameInstall) -> Vec<PathBuf> {
-    let mut parents: Vec<PathBuf> = PROFILE_DIRECTORY_NAMES
-        .iter()
-        .map(|sub| install.documents_dir.join(sub))
-        .collect();
+    let mut parents: Vec<PathBuf> = PROFILE_DIRECTORY_NAMES.iter().map(|sub| install.documents_dir.join(sub)).collect();
     parents.extend(steam_userdata_profile_dirs(install.game.app_id()));
 
     let mut seen: Vec<String> = Vec::new();
@@ -162,8 +135,7 @@ pub fn discover_profiles(install: &GameInstall) -> Vec<PathBuf> {
     for parent in parents {
         for profile_dir in subdirs_sorted(&parent) {
             let sii = profile_dir.join(PROFILE_FILE_NAME);
-            let Some(name) = profile_dir.file_name().map(|n| n.to_string_lossy().into_owned())
-            else {
+            let Some(name) = profile_dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
                 continue;
             };
             if sii.is_file() && !seen.contains(&name) {
@@ -191,10 +163,7 @@ fn entry_rest(line: &str) -> Option<&str> {
     if digits == 0 {
         return None;
     }
-    rest[digits..]
-        .strip_prefix(']')?
-        .trim_start()
-        .strip_prefix(':')
+    rest[digits..].strip_prefix(']')?.trim_start().strip_prefix(':')
 }
 
 /// `active_mods: <n>` count line -> its indentation.
@@ -295,11 +264,8 @@ pub fn write_active_mods(profile_sii_path: &Path, mods: &[ActiveMod]) -> Result<
         .find(|u| u.class == PROFILE_UNIT_CLASS)
         .map(|u| u.list("active_mods", false))
         .ok_or_else(|| format_err("rewritten profile lost its user_profile unit"))?;
-    let names_match = written.len() == mods.len()
-        && written
-            .iter()
-            .zip(mods)
-            .all(|(raw, m)| ActiveMod::parse(raw).name == m.name);
+    let names_match =
+        written.len() == mods.len() && written.iter().zip(mods).all(|(raw, m)| ActiveMod::parse(raw).name == m.name);
     if !names_match {
         return Err(format_err("rewritten profile does not match the requested list"));
     }
@@ -307,9 +273,7 @@ pub fn write_active_mods(profile_sii_path: &Path, mods: &[ActiveMod]) -> Result<
 }
 
 fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
-    let dir = target
-        .parent()
-        .ok_or_else(|| format_err("profile path has no parent directory"))?;
+    let dir = target.parent().ok_or_else(|| format_err("profile path has no parent directory"))?;
     let tmp = dir.join(format!(".{}.{}.tmp", PROFILE_FILE_NAME, std::process::id()));
     let result = (|| -> Result<()> {
         let mut fh = File::create(&tmp)?;
@@ -356,9 +320,9 @@ pub fn system_data_dir() -> PathBuf {
     let base = if cfg!(windows) {
         env::var_os("APPDATA").map(PathBuf::from)
     } else {
-        env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
-            env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
-        })
+        env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
     };
     base.unwrap_or_else(env::temp_dir).join(APP_DIR_NAME)
 }
@@ -394,14 +358,9 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// `root/<hex-dir-name>/<timestamp>.zip` - outside the game's profile
 /// tree, so the game never sees it.
 pub fn create_backup(sii_path: &Path, root: &Path) -> Result<BackupEntry> {
-    let profile_dir = sii_path
-        .parent()
-        .filter(|p| p.is_dir())
-        .ok_or_else(|| Error::NotFound(sii_path.display().to_string()))?;
-    let dir_name = profile_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let profile_dir =
+        sii_path.parent().filter(|p| p.is_dir()).ok_or_else(|| Error::NotFound(sii_path.display().to_string()))?;
+    let dir_name = profile_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let target_dir = root.join(&dir_name);
     fs::create_dir_all(&target_dir)?;
 
@@ -422,8 +381,7 @@ pub fn create_backup(sii_path: &Path, root: &Path) -> Result<BackupEntry> {
 
     let result = (|| -> Result<()> {
         let mut zw = zip::ZipWriter::new(File::create(&tmp)?);
-        let opts = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         for file in &files {
             let rel = file
                 .strip_prefix(profile_dir)
@@ -462,10 +420,7 @@ pub fn list_backups(sii_path: &Path, root: &Path) -> Vec<BackupEntry> {
     let Ok(dir) = backup_dir_for(sii_path, root) else {
         return Vec::new();
     };
-    let profile_dir_name = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let profile_dir_name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut entries: Vec<BackupEntry> = fs::read_dir(&dir)
         .map(|rd| {
             rd.flatten()
@@ -473,10 +428,7 @@ pub fn list_backups(sii_path: &Path, root: &Path) -> Vec<BackupEntry> {
                 .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")))
                 .map(|path| BackupEntry {
                     // file names are `YYYY-MM-DD_HH-MM-SS[_n].zip`
-                    timestamp: path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
+                    timestamp: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
                     size_bytes: fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
                     profile_dir_name: profile_dir_name.clone(),
                     path,
@@ -506,9 +458,7 @@ fn own_backup(sii_path: &Path, root: &Path, backup_path: &Path) -> Result<Backup
 /// backup are left alone. Returns the safety backup that was taken.
 pub fn restore_backup(sii_path: &Path, root: &Path, backup_path: &Path) -> Result<BackupEntry> {
     let backup = own_backup(sii_path, root, backup_path)?;
-    let profile_dir = sii_path
-        .parent()
-        .ok_or_else(|| format_err("profile path has no parent directory"))?;
+    let profile_dir = sii_path.parent().ok_or_else(|| format_err("profile path has no parent directory"))?;
 
     // read the whole archive before touching the profile: a corrupt backup
     // must fail here, not halfway through overwriting files
@@ -520,9 +470,8 @@ pub fn restore_backup(sii_path: &Path, root: &Path, backup_path: &Path) -> Resul
             continue;
         }
         // `enclosed_name` refuses absolute paths and `..` components
-        let rel = entry
-            .enclosed_name()
-            .ok_or_else(|| format_err(format!("unsafe path in backup: {}", entry.name())))?;
+        let rel =
+            entry.enclosed_name().ok_or_else(|| format_err(format!("unsafe path in backup: {}", entry.name())))?;
         let mut data = Vec::with_capacity(entry.size().min(1 << 24) as usize);
         std::io::Read::read_to_end(&mut entry, &mut data)?;
         files.push((rel, data));
@@ -554,20 +503,12 @@ pub fn prune_backups(sii_path: &Path, root: &Path, keep: u32) -> usize {
     if keep == 0 {
         return 0;
     }
-    list_backups(sii_path, root)
-        .into_iter()
-        .skip(keep as usize)
-        .filter(|b| fs::remove_file(&b.path).is_ok())
-        .count()
+    list_backups(sii_path, root).into_iter().skip(keep as usize).filter(|b| fs::remove_file(&b.path).is_ok()).count()
 }
 
 /// Back up the profile, then write the new active list. The backup holds
 /// the pre-edit profile, so one is always recoverable.
-pub fn save_active_mods(
-    profile_sii_path: &Path,
-    mods: &[ActiveMod],
-    backup_root: &Path,
-) -> Result<BackupEntry> {
+pub fn save_active_mods(profile_sii_path: &Path, mods: &[ActiveMod], backup_root: &Path) -> Result<BackupEntry> {
     let entry = create_backup(profile_sii_path, backup_root)?;
     write_active_mods(profile_sii_path, mods)?;
     Ok(entry)
@@ -580,10 +521,7 @@ mod tests {
     const PROFILE: &str = "SiiNunit\n{\nuser_profile : _nameless.1 {\n face: 3\n active_mods: 3\n active_mods[0]: \"a|Alpha \\\"quoted\\\"\"\n active_mods[1]: \"b|Beta | pipe\"\n active_mods[2]: \"c\"\n profile_name: \"Jo\"\n}\n}\n";
 
     fn am(name: &str, display: &str) -> ActiveMod {
-        ActiveMod {
-            name: name.into(),
-            display_name: display.into(),
-        }
+        ActiveMod { name: name.into(), display_name: display.into() }
     }
 
     #[test]

@@ -80,7 +80,7 @@ fn bits_per_pixel(format: u32) -> Option<usize> {
 /// `(row_pitch, slice_pitch)` in bytes for one mip level.
 fn surface_info(w: usize, h: usize, format: u32) -> Result<(usize, usize)> {
     let block = match format {
-        70..=72 | 79..=81 => Some(8),           // BC1, BC4
+        70..=72 | 79..=81 => Some(8),            // BC1, BC4
         73..=78 | 82..=84 | 94..=99 => Some(16), // BC2, BC3, BC5, BC6H, BC7
         _ => None,
     };
@@ -110,8 +110,7 @@ fn surface_info(w: usize, h: usize, format: u32) -> Result<(usize, usize)> {
             (row, row * h + (row * h).div_ceil(2))
         }
         _ => {
-            let bpp = bits_per_pixel(format)
-                .ok_or_else(|| format_err(format!("unsupported dxgi format {format}")))?;
+            let bpp = bits_per_pixel(format).ok_or_else(|| format_err(format!("unsupported dxgi format {format}")))?;
             let row = (w * bpp).div_ceil(8);
             (row, row * h)
         }
@@ -178,7 +177,7 @@ fn dds_header(meta: &TobjMeta) -> Vec<u8> {
     put(&[DDS_MAGIC, 124, flags, meta.height, meta.width]);
     put(&[0, 0, meta.mip]); // pitch, depth, mip count
     put(&[0; 11]); // reserved
-    // DDS_PIXELFORMAT: always the DX10 four-cc, masks unused
+                   // DDS_PIXELFORMAT: always the DX10 four-cc, masks unused
     put(&[32, DDPF_FOURCC, DX10_FOURCC, 0, 0, 0, 0, 0]);
     put(&[caps, caps2, 0, 0, 0]);
     // DDS_HEADER_DXT10: format, Texture2D, cube flag, array size, misc flags 2

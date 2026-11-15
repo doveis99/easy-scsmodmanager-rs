@@ -28,8 +28,8 @@ use crate::scs::cityhash::city_hash64;
 use crate::scs::dir::DirSource;
 use crate::scs::hashfs::HashFsReader;
 use crate::scs::zip::{is_zipfile, RawZipSource, ZipSource};
-use crate::sii::crypto::sii_bytes_to_text;
 use crate::scs::{detect_format, ModSource, ScsFormat};
+use crate::sii::crypto::sii_bytes_to_text;
 use crate::workshop::{resolve_workshop_payload, ARCHIVE_SUFFIXES};
 use crate::worldmap::{self, MapFacts};
 use crate::Error;
@@ -114,19 +114,12 @@ impl ScannedMod {
     pub fn display_name(&self) -> String {
         match &self.manifest {
             Some(m) if !m.display_name.is_empty() => m.display_name.clone(),
-            _ => self
-                .path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            _ => self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
         }
     }
 
     fn manifest_categories(&self) -> &[String] {
-        self.manifest
-            .as_ref()
-            .map(|m| m.categories.as_slice())
-            .unwrap_or_default()
+        self.manifest.as_ref().map(|m| m.categories.as_slice()).unwrap_or_default()
     }
 
     /// What the content says the mod is, where that differs from the
@@ -138,18 +131,8 @@ impl ScannedMod {
     /// Categories: the user's pins (main one first), else what the
     /// content proves, else the manifest.
     pub fn effective_categories(&self, pins: &[String]) -> Vec<String> {
-        let judged = self
-            .verdict()
-            .filter(|v| v.applied)
-            .map(|v| v.categories)
-            .unwrap_or_default();
-        effective_categories(
-            self.manifest_categories(),
-            self.is_map,
-            pins,
-            content_category(&self.def_files),
-            &judged,
-        )
+        let judged = self.verdict().filter(|v| v.applied).map(|v| v.categories).unwrap_or_default();
+        effective_categories(self.manifest_categories(), self.is_map, pins, content_category(&self.def_files), &judged)
     }
 
     /// A category the content points to without being sure enough to
@@ -289,23 +272,14 @@ fn name_hidden_files(mods: &mut [ScannedMod], mut game_paths: Option<&mut GamePa
             m.is_map = true;
         }
         let listed: std::collections::HashSet<String> = m.def_files.iter().cloned().collect();
-        m.def_files.extend(
-            names
-                .into_iter()
-                .filter(|name| name.starts_with("def/") && !listed.contains(name)),
-        );
+        m.def_files.extend(names.into_iter().filter(|name| name.starts_with("def/") && !listed.contains(name)));
     }
 }
 
 fn sorted_children(dir: &Path) -> Vec<PathBuf> {
-    let mut children: Vec<PathBuf> = fs::read_dir(dir)
-        .map(|rd| rd.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
-    children.sort_by_key(|p| {
-        p.file_name()
-            .map(|n| n.to_string_lossy().to_lowercase())
-            .unwrap_or_default()
-    });
+    let mut children: Vec<PathBuf> =
+        fs::read_dir(dir).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    children.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default());
     children
 }
 
@@ -320,8 +294,7 @@ fn mod_candidates(directory: &Path) -> Vec<PathBuf> {
     sorted_children(directory)
         .into_iter()
         .filter(|child| {
-            (child.is_file() && has_archive_suffix(child))
-                || (child.is_dir() && child.join(MANIFEST_ENTRY).is_file())
+            (child.is_file() && has_archive_suffix(child)) || (child.is_dir() && child.join(MANIFEST_ENTRY).is_file())
         })
         .collect()
 }
@@ -386,11 +359,7 @@ fn strip_base_prefix(path: &str) -> &str {
 /// ownership is unknown).
 fn strip_dlc_prefix<'a>(path: &'a str, owned_dlc: Option<&BTreeSet<String>>) -> &'a str {
     match path.split_once('/') {
-        Some((first, rest))
-            if first.starts_with("dlc_") && owned_dlc.is_none_or(|o| o.contains(first)) =>
-        {
-            rest
-        }
+        Some((first, rest)) if first.starts_with("dlc_") && owned_dlc.is_none_or(|o| o.contains(first)) => rest,
         _ => path,
     }
 }
@@ -451,11 +420,8 @@ fn listing_facts(
         .collect();
     let is_map = contains_map(&normalized);
     // drop directory entries ("def/", "def/vehicle/")
-    let def_files = normalized
-        .iter()
-        .filter(|p| p.starts_with("def/") && !p.ends_with('/'))
-        .map(|p| p.to_string())
-        .collect();
+    let def_files =
+        normalized.iter().filter(|p| p.starts_with("def/") && !p.ends_with('/')).map(|p| p.to_string()).collect();
     // every mounted file below the root; root-level files (manifest.sii,
     // icon, description) exist in every mod and never conflict meaningfully
     let mut hashes: Vec<u64> = Vec::new();
@@ -493,10 +459,8 @@ fn listing_facts(
             .collect();
         // the table stores the paths as the archive spells them, before
         // the package-layer normalisation above
-        let listed: std::collections::HashSet<u64> = files
-            .iter()
-            .map(|f| city_hash64(f.trim_start_matches('/').as_bytes()))
-            .collect();
+        let listed: std::collections::HashSet<u64> =
+            files.iter().map(|f| city_hash64(f.trim_start_matches('/').as_bytes())).collect();
         for hash in table.into_iter().filter(|h| !root.contains(h)) {
             if !listed.contains(&hash) {
                 hidden.push(hash);
@@ -711,9 +675,8 @@ fn gather_world_map(source: &mut dyn ModSource, files: &[String], provides: &[u6
         facts.has_data = true;
         facts.data = worldmap::read_map_data(source, path);
     }
-    facts.background = worldmap::BACKGROUND_FILES
-        .iter()
-        .any(|file| provides.binary_search(&city_hash64(file.as_bytes())).is_ok());
+    facts.background =
+        worldmap::BACKGROUND_FILES.iter().any(|file| provides.binary_search(&city_hash64(file.as_bytes())).is_ok());
     facts.sectors = sectors.into_iter().collect();
     facts.maps = maps.into_iter().collect();
     facts
@@ -778,9 +741,7 @@ fn scan_archive(path: &Path, ctx: ScanContext) -> ScannedMod {
     };
     // some workshop mods ship a .zip with leading junk before the first
     // local header; a valid central directory still makes it a ZIP
-    let is_zip_ext = path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    let is_zip_ext = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
     if format == ScsFormat::Unknown && is_zip_ext && is_zipfile(path) {
         format = ScsFormat::Zip;
     }
@@ -822,15 +783,8 @@ fn scan_zip(path: &Path, ctx: ScanContext) -> ScannedMod {
     }
 }
 
-const ZIP_ICON_CANDIDATES: &[&str] = &[
-    "icon.jpg",
-    "icon.png",
-    "mod_icon.jpg",
-    "mod_icon.png",
-    "preview.jpg",
-    "preview.png",
-    "thumbnail.jpg",
-];
+const ZIP_ICON_CANDIDATES: &[&str] =
+    &["icon.jpg", "icon.png", "mod_icon.jpg", "mod_icon.png", "preview.jpg", "preview.png", "thumbnail.jpg"];
 
 /// Pull an icon out of a ZIP even when the manifest is unreadable. Map
 /// mods that encrypt manifest.sii usually leave the icon in the clear.
@@ -896,10 +850,8 @@ mod tests {
 
     #[test]
     fn map_and_defs_dedupe_and_skip_directories() {
-        let files: Vec<String> = ["def/", "def/a.sii", "base/def/a.sii", "/map/x.mbd", "ui/b.mat"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let files: Vec<String> =
+            ["def/", "def/a.sii", "base/def/a.sii", "/map/x.mbd", "ui/b.mat"].iter().map(|s| s.to_string()).collect();
         let facts = listing_facts(&files, None, &[], None, None);
         assert!(facts.is_map);
         assert_eq!(facts.def_files, vec!["def/a.sii"]);
@@ -1030,7 +982,8 @@ mod tests {
         assert!(blind[0].overlaps(&blind[1]), "the hashes still give the overlap away");
 
         let mut game = GamePaths::build(
-            ["def/vehicle/truck/x/engine/big.sii", "def/vehicle/truck/x/engine/small.sii", "map/europe.mbd"].into_iter(),
+            ["def/vehicle/truck/x/engine/big.sii", "def/vehicle/truck/x/engine/small.sii", "map/europe.mbd"]
+                .into_iter(),
             "sig",
             &tmp.path().join("paths.bin"),
         )
@@ -1138,8 +1091,7 @@ mod tests {
             (m.file_hashes, m.own_hashes) = (facts.file_hashes, facts.own_hashes);
             m
         };
-        let truck_files =
-            ["def/vehicle/truck/new/data.sii", "def/vehicle/truck/stock/engine.sii", "automat/bb/2.mat"];
+        let truck_files = ["def/vehicle/truck/new/data.sii", "def/vehicle/truck/stock/engine.sii", "automat/bb/2.mat"];
         let truck = mk(&truck_files, Some(&game));
         // only the truck's own definition is a file it brings
         assert_eq!(truck.own_hashes.as_ref(), [city_hash64(b"def/vehicle/truck/new/data.sii")]);
@@ -1218,7 +1170,8 @@ prefab_model : prefab.b {
                 ("model/own/roof.tobj", b"."),
             ],
         );
-        let mut game = GamePaths::build(["prefab/cross/x.ppd"].into_iter(), "sig", &tmp.path().join("paths.bin")).unwrap();
+        let mut game =
+            GamePaths::build(["prefab/cross/x.ppd"].into_iter(), "sig", &tmp.path().join("paths.bin")).unwrap();
 
         let mods = scan_paths(&mod_candidates(&mod_dir), None, Some(&mut game));
         let m = &mods[0];
@@ -1250,7 +1203,10 @@ prefab_model : prefab.b {
             &mod_dir.join("a_def.scs"),
             &[
                 ("manifest.sii", MANIFEST),
-                ("def/map_data.sii", b"map_data : .map.data {\n ui_map_center: (66700, -24700)\n ui_map_size: (8127, 7928)\n}"),
+                (
+                    "def/map_data.sii",
+                    b"map_data : .map.data {\n ui_map_center: (66700, -24700)\n ui_map_size: (8127, 7928)\n}",
+                ),
                 ("map/europe/sec+0010-0002.base", b"."),
                 ("map/europe/sec+0010-0002.aux", b"."),
                 ("Map/Europe/sec-0034+0021.base", b"."),

@@ -41,11 +41,8 @@ fn signature(archives: &[PathBuf]) -> String {
     for a in archives {
         let (len, mtime) = fs::metadata(a)
             .map(|m| {
-                let mtime = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_secs());
+                let mtime =
+                    m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
                 (m.len(), mtime)
             })
             .unwrap_or((0, 0));
@@ -56,9 +53,8 @@ fn signature(archives: &[PathBuf]) -> String {
 }
 
 fn game_archives(game_dir: &Path) -> Vec<PathBuf> {
-    let mut archives: Vec<PathBuf> = fs::read_dir(game_dir)
-        .map(|rd| rd.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
+    let mut archives: Vec<PathBuf> =
+        fs::read_dir(game_dir).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
     archives.retain(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("scs")));
     archives.sort();
     archives
@@ -115,9 +111,7 @@ impl GamePaths {
             let mut offset = 0u32;
             for (_, path) in &rows {
                 w.write_all(&offset.to_le_bytes())?;
-                offset = offset
-                    .checked_add(path.len() as u32)
-                    .ok_or_else(|| format_err("path list too large"))?;
+                offset = offset.checked_add(path.len() as u32).ok_or_else(|| format_err("path list too large"))?;
             }
             w.write_all(&offset.to_le_bytes())?;
             for (_, path) in &rows {
@@ -167,12 +161,7 @@ impl GamePaths {
         if !sorted || blob_start + blob_len != file_len {
             return Err(stale());
         }
-        Ok(GamePaths {
-            hashes,
-            offsets,
-            file: r.into_inner(),
-            blob_start,
-        })
+        Ok(GamePaths { hashes, offsets, file: r.into_inner(), blob_start })
     }
 
     pub fn len(&self) -> usize {
@@ -262,7 +251,8 @@ mod tests {
         assert_eq!(fs::metadata(&cache).unwrap().modified().unwrap(), stamp);
 
         // a new archive (an update, a DLC) rebuilds it
-        fs::write(game.join("dlc_x.scs"), build_v1(0, &[("def/b.sii", b"b", false), ("map/x.mbd", b"m", false)])).unwrap();
+        fs::write(game.join("dlc_x.scs"), build_v1(0, &[("def/b.sii", b"b", false), ("map/x.mbd", b"m", false)]))
+            .unwrap();
         let mut gp = GamePaths::load_or_build(&game, &cache).unwrap();
         assert_eq!(gp.len(), 3);
         assert!(gp.name_of(city_hash64(b"map/x.mbd")).is_some());

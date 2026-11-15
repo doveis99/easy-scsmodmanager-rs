@@ -125,11 +125,8 @@ pub fn install_update(on_progress: Channel<DownloadProgress>, state: State<'_, A
         .clone()
         .filter(|r| update::is_newer(&r.version, CURRENT_VERSION))
         .ok_or_else(|| coded("update_none", &[]))?;
-    let package = release
-        .package
-        .as_ref()
-        .filter(|_| installable(&release))
-        .ok_or_else(|| coded("update_no_package", &[]))?;
+    let package =
+        release.package.as_ref().filter(|_| installable(&release)).ok_or_else(|| coded("update_no_package", &[]))?;
 
     if updates.busy.swap(true, Ordering::SeqCst) {
         return Err(coded("update_busy", &[]));
