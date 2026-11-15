@@ -17,6 +17,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const windows = process.platform === "win32";
 const exeName = windows ? "easy-scsmodmanager.exe" : "easy-scsmodmanager";
 const version = /^version\s*=\s*"([^"]+)"/m.exec(readFileSync(join(root, "Cargo.toml"), "utf8"))?.[1] ?? "0.0.0";
+// the app updates itself from the zip built below: its name and the name
+// of the executable inside it are what crates/scsmm-core/src/update.rs
+// looks for (package_name, PROGRAM_NAME)
 const folderName = "Easy SCS Mod Manager";
 const outRoot = join(root, "dist-portable");
 const outDir = join(outRoot, folderName);
@@ -67,6 +70,8 @@ writeFileSync(
       "  the app uses %APPDATA%\\easy-scsmodmanager-rs instead.",
       "- The Microsoft Edge WebView2 runtime is required. Windows 11 has it.",
       "- The language follows Windows; change it under Settings.",
+      "- At start the app asks GitHub for a newer version and offers to install",
+      "  it. This can be switched off under Settings.",
       "",
       "== 한국어 ==",
       "",
@@ -80,6 +85,8 @@ writeFileSync(
       "- Microsoft Edge WebView2 런타임이 필요합니다. Windows 11에는 기본으로",
       "  들어 있습니다.",
       "- 언어는 Windows 설정을 따르며, 설정에서 바꿀 수 있습니다.",
+      "- 시작할 때 GitHub에서 새 버전을 확인하고, 있으면 설치할지 묻습니다.",
+      "  설정에서 끌 수 있습니다.",
       "",
       "== 简体中文 ==",
       "",
@@ -92,6 +99,7 @@ writeFileSync(
       "  %APPDATA%\\easy-scsmodmanager-rs。",
       "- 需要 Microsoft Edge WebView2 运行时。Windows 11 已自带。",
       "- 界面语言跟随 Windows，可以在“设置”中更改。",
+      "- 启动时会向 GitHub 查询新版本，并询问是否安装。可以在“设置”中关闭。",
       "",
       "GPL-3.0-or-later. A Rust rewrite of Switch-Bros/easy-scsmodmanager.",
       "https://github.com/doveis99/easy-scsmodmanager-rs",

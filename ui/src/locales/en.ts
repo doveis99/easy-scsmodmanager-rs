@@ -19,6 +19,7 @@ export const en: Messages = {
   "top.profile": "Profile",
   "top.backups": "Backups",
   "top.settings": "Settings",
+  "top.version": "Version of this program",
   "top.rescan": "Rescan",
   "game.notFound": "Installation not found",
   "game.version": "Game version {version}",
@@ -263,6 +264,14 @@ export const en: Messages = {
   "settings.lookupNote": "After a scan, only Workshop IDs that are not cached yet are sent to Steam's public API.",
   "settings.keep": "Backups kept per profile",
   "settings.keepNote": "0 keeps all of them. Backup location: {path}",
+  "settings.updateCheck": "Look for a newer version at start",
+  "settings.updateNote":
+    "Reads the release information on GitHub once. Nothing is sent, and a newer version is only installed when you ask for it.",
+  "settings.version": "Current version {version}",
+  "settings.checkNow": "Check now",
+  "settings.checking": "Checking…",
+  "settings.upToDate": "This is the latest version.",
+  "settings.updateFound": "Version {version} is out. Close the settings and press 'Update {version}' at the top.",
   "settings.keepInvalid": "The number of backups must be a whole number from 0 to 1000.",
   "settings.ets2Paths": "ETS2 paths",
   "settings.atsPaths": "ATS paths",
@@ -278,6 +287,29 @@ export const en: Messages = {
   "settings.savedDirty":
     "Settings saved. The load order has unsaved changes, so nothing was rescanned. Press 'Rescan' to apply them.",
   "settings.savedNoInstall": "Settings saved. No ETS2 / ATS data folder was found.",
+
+  // ---- updates
+  "update.button": "Update {version}",
+  "update.buttonTitle": "A newer version is out. Click to look at it and update.",
+  "update.title": "Update",
+  "update.available": "Version {latest} is out. You are using {current}.",
+  "update.how":
+    "The new version ({size}) is downloaded from GitHub, the program file is replaced and the app starts again. The data folder with your settings, presets and backups stays as it is.",
+  "update.dirty": "Load order changes you have not saved are lost when the app starts again.",
+  "update.manual": "This program file cannot replace itself. Get the new version from the download page.",
+  "update.later": "Later",
+  "update.notes": "Release notes",
+  "update.install": "Update now",
+  "update.page": "Open the download page",
+  "update.downloading": "Downloading version {version}.",
+  "update.connecting": "Connecting…",
+  "update.progress": "{done} / {total}",
+  "update.cancelled": "Update cancelled.",
+  "update.restarting": "Updated to {version}. Starting again…",
+  "update.failed": "Update failed: {error}",
+  "update.failedTitle": "Update failed",
+  "update.failedBody":
+    "The update could not be installed. The version you are using is unchanged.\n\n{error}\n\nYou can also get the new version from the download page yourself.",
 
   // ---- sharing
   "share.intro":
@@ -387,4 +419,12 @@ export const en: Messages = {
   "err.preset_empty_name": "Type a name for the preset.",
   "err.preset_name_taken": "A preset named '{0}' already exists. To overwrite it, press 'Update from current list' in the list.",
   "err.preset_not_found": "There is no preset named '{0}'.",
+  "err.update_check_failed": "Could not look for a newer version: {0}",
+  "err.update_none": "There is no newer version to install.",
+  "err.update_no_package": "This release has no file that can be installed automatically.",
+  "err.update_busy": "An update is already in progress.",
+  "err.update_download": "The new version could not be downloaded: {0}",
+  "err.update_cancelled": "Update cancelled.",
+  "err.update_bad_package": "The download does not hold the program: {0}",
+  "err.update_write": "The program file could not be replaced. Check that the program's folder can be written to: {0}",
 };

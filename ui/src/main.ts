@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open as pickOpen, save as pickSave } from "@tauri-apps/plugin-dialog";
-import { $, confirmModal, dismissDialog, h, infoModal, openDialog } from "./dom";
+import { $, type DialogButton, confirmModal, dismissDialog, h, infoModal, openDialog } from "./dom";
 import { LANGS, applyStatic, hasKey, locale, num, resolveLang, setLang, t } from "./i18n";
 
 // ---------------------------------------------------------------- types
@@ -116,6 +116,8 @@ interface ViewSettings {
 
 interface Settings {
   workshop_lookup: boolean;
+  /** Ask GitHub at start whether a newer version is out. */
+  update_check: boolean;
   backup_keep: number;
   map_base_names: string[];
   last_game: GameId | null;
@@ -130,6 +132,19 @@ interface SettingsView {
   settings: Settings;
   detected: Partial<Record<GameId, { documents_dir: string | null; workshop_dir: string | null }>>;
   backup_root: string;
+  /** Version of the running app. */
+  version: string;
+}
+
+/** What the last look at the releases found. */
+interface UpdateInfo {
+  current: string;
+  latest: string;
+  newer: boolean;
+  /** The app can replace itself; otherwise only the release page helps. */
+  installable: boolean;
+  /** Bytes to download. */
+  size: number;
 }
 
 interface BackupDto {
@@ -236,6 +251,8 @@ const state = {
   clipboard: null as { game: GameId; mods: Preset["mods"] } | null,
   filter: { q: "", category: "", source: "", sort: "name", favorites: false },
   settings: null as SettingsView | null,
+  /** The latest release, once it has been looked up. */
+  update: null as UpdateInfo | null,
   /** Bumped per load so a slow response for an old game/profile is dropped. */
   epoch: 0,
 };
@@ -1722,6 +1739,30 @@ async function openSettings() {
   const s = view.settings;
 
   const lookup = h("input", { type: "checkbox", id: "set-lookup", checked: s.workshop_lookup });
+  const updateCheck = h("input", { type: "checkbox", id: "set-update", checked: s.update_check });
+  const updateResult = h("span", { class: "form-note", id: "set-update-result", role: "status" });
+  const checkNow: HTMLButtonElement = h(
+    "button",
+    {
+      type: "button",
+      class: "btn small",
+      id: "set-check-update",
+      onclick: async () => {
+        checkNow.disabled = true;
+        updateResult.textContent = t("settings.checking");
+        try {
+          const info = await checkUpdate(true);
+          updateResult.textContent = info?.newer
+            ? t("settings.updateFound", { version: info.latest })
+            : t("settings.upToDate");
+        } catch (e) {
+          updateResult.textContent = errorText(e);
+        }
+        checkNow.disabled = false;
+      },
+    },
+    t("settings.checkNow"),
+  );
   // each language under its own name, so it can be found in any language
   const language = h(
     "select",
@@ -1781,6 +1822,15 @@ async function openSettings() {
       h("span", {}, t("settings.lookup")),
     ),
     h("div", { class: "form-note" }, t("settings.lookupNote")),
+    h("label", { class: "form-check" }, updateCheck, h("span", {}, t("settings.updateCheck"))),
+    h("div", { class: "form-note" }, t("settings.updateNote")),
+    h(
+      "div",
+      { class: "form-inline" },
+      h("span", {}, t("settings.version", { version: view.version })),
+      checkNow,
+      updateResult,
+    ),
     field(t("settings.keep"), keep, t("settings.keepNote", { path: view.backup_root })),
     ...pathFields(t("settings.ets2Paths"), inputs.ets2),
     ...pathFields(t("settings.atsPaths"), inputs.ats),
@@ -1814,6 +1864,7 @@ async function openSettings() {
         ...s,
         language: language.value || null,
         workshop_lookup: lookup.checked,
+        update_check: updateCheck.checked,
         backup_keep: count,
         map_base_names: names.value.split("\n"),
         ets2: { ...s.ets2, documents_dir: text(inputs.ets2.documents), workshop_dir: text(inputs.ets2.workshop) },
@@ -1852,6 +1903,136 @@ async function openSettings() {
   }
   icons.clear();
   await loadGame(target.game);
+}
+
+// -------------------------------------------------------------- updates
+
+/** Look up the latest release. The look at start (`manual` unset) does
+ *  nothing when it is switched off in the settings. */
+async function checkUpdate(manual: boolean): Promise<UpdateInfo | null> {
+  const info = await invoke<UpdateInfo | null>("check_update", { manual });
+  if (info) {
+    state.update = info;
+    renderUpdateButton();
+  }
+  return info;
+}
+
+/** The button in the top bar is only there while a newer version is out. */
+function renderUpdateButton() {
+  const button = $("open-update");
+  const info = state.update;
+  button.hidden = !info?.newer;
+  if (info?.newer) button.textContent = t("update.button", { version: info.latest });
+}
+
+function openReleasePage(onError: (message: string) => void) {
+  invoke("open_release_page").catch((e) => onError(errorText(e)));
+}
+
+async function openUpdate() {
+  const info = state.update;
+  if (!info?.newer) return;
+  const error = h("div", { class: "form-error", role: "alert" });
+  const showError = (message: string) => (error.textContent = message);
+
+  const lines = [t("update.available", { latest: info.latest, current: info.current })];
+  if (info.installable) {
+    lines.push(t("update.how", { size: fmtSize(info.size) }));
+    if (isDirty()) lines.push(t("update.dirty"));
+  } else {
+    lines.push(t("update.manual"));
+  }
+  const buttons: DialogButton<"later" | "page" | "install">[] = [{ label: t("update.later"), value: "later" }];
+  if (info.installable) buttons.push({ label: t("update.install"), value: "install", kind: "primary" });
+  else buttons.push({ label: t("update.page"), value: "page", kind: "primary" });
+
+  const choice = await openDialog({
+    title: t("update.title"),
+    body: h(
+      "div",
+      { class: "form" },
+      h("div", { class: "report" }, lines.join("\n\n")),
+      // the notes open in the browser; the dialog stays for the decision
+      info.installable &&
+        h(
+          "div",
+          {},
+          h(
+            "button",
+            { type: "button", class: "btn small", id: "update-notes", onclick: () => openReleasePage(showError) },
+            t("update.notes"),
+          ),
+        ),
+      error,
+    ),
+    dismiss: "later",
+    buttons,
+  });
+  if (choice === "install") await installUpdate(info);
+  else if (choice === "page") openReleasePage((message) => setStatus(message, "error"));
+}
+
+/** Download the new version, put it in place of the program file and
+ *  start the app again. */
+async function installUpdate(info: UpdateInfo) {
+  const bar = h("progress", { class: "extract-bar", max: "1", value: "0" });
+  const count = h("div", { class: "form-note" }, t("update.connecting"));
+  const body = h("div", { class: "form" }, h("div", {}, t("update.downloading", { version: info.latest })), bar, count);
+  const onProgress = new Channel<{ done: number; total: number }>();
+  onProgress.onmessage = ({ done, total }) => {
+    bar.max = Math.max(total, 1);
+    bar.value = done;
+    count.textContent = t("update.progress", { done: fmtSize(done), total: fmtSize(total) });
+  };
+
+  // closing the progress dialog in any way is a request to stop; it goes
+  // away on its own when the download ends
+  let running = true;
+  let dialogOpen = true;
+  void openDialog<void>({
+    title: t("update.title"),
+    body,
+    dismiss: undefined,
+    buttons: [{ label: t("common.cancel"), value: undefined }],
+  }).then(() => {
+    dialogOpen = false;
+    if (running) invoke("cancel_update").catch(() => {});
+  });
+
+  let installed: string;
+  try {
+    installed = await invoke<string>("install_update", { onProgress });
+  } catch (e) {
+    running = false;
+    if (dialogOpen) dismissDialog();
+    const raw = e instanceof Error ? e.message : String(e);
+    if (raw === "@update_cancelled") {
+      setStatus(t("update.cancelled"));
+      return;
+    }
+    const message = backendText(raw);
+    setStatus(t("update.failed", { error: message }), "error");
+    const toPage = await openDialog<boolean>({
+      title: t("update.failedTitle"),
+      body: h("div", { class: "report" }, t("update.failedBody", { error: message })),
+      dismiss: false,
+      buttons: [
+        { label: t("common.close"), value: false },
+        { label: t("update.page"), value: true, kind: "primary" },
+      ],
+    });
+    if (toPage) openReleasePage((text) => setStatus(text, "error"));
+    return;
+  }
+  running = false;
+  if (dialogOpen) dismissDialog();
+  setStatus(t("update.restarting", { version: installed }), "ok");
+  try {
+    await invoke("restart_app");
+  } catch (e) {
+    setStatus(errorText(e), "error");
+  }
 }
 
 // -------------------------------------------------------------- sharing
@@ -2412,6 +2593,7 @@ function bindControls() {
     renderLibrary();
     rememberView();
   });
+  $("open-update").addEventListener("click", () => void openUpdate());
   $("open-settings").addEventListener("click", () => void openSettings());
   $("open-backups").addEventListener("click", () => void openBackups());
   $("open-share").addEventListener("click", () => void openShareMenu());
@@ -2466,6 +2648,7 @@ function applyLanguage() {
   select.value = chosen;
   renderGameSwitch();
   renderProfileSelect();
+  renderUpdateButton();
   renderAll();
 }
 
@@ -2484,7 +2667,10 @@ async function boot() {
     setStatus(errorText(e), "error");
     return;
   }
+  $("app-version").textContent = state.settings.version;
   applyLanguage();
+  // in the background, and quietly: being offline is no error at start
+  checkUpdate(false).catch(() => {});
   restoreView(state.settings.settings.view);
   if (state.installs.length === 0) {
     renderGameSwitch();

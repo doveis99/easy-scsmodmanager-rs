@@ -13,7 +13,7 @@
        -aria and -title variants the one for that attribute. -->
   <body>
     <header class="topbar">
-      <div class="brand">Easy SCS Mod Manager</div>
+      <div class="brand">Easy SCS Mod Manager <span class="brand-version" id="app-version" data-i18n-title="top.version"></span></div>
       <div class="seg" id="game-switch" role="tablist" data-i18n-aria="top.game"></div>
       <label class="field">
         <span data-i18n="top.profile"></span>
@@ -22,6 +22,7 @@
       <button id="open-backups" class="btn" data-i18n="top.backups"></button>
       <div class="spacer"></div>
       <span class="muted" id="game-version"></span>
+      <button id="open-update" class="btn update" data-i18n-title="update.buttonTitle" hidden></button>
       <button id="open-settings" class="btn" data-i18n="top.settings"></button>
       <button id="rescan" class="btn" data-i18n="top.rescan"></button>
     </header>

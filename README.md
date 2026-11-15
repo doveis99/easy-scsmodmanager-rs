@@ -35,11 +35,12 @@ The interface is available in English, Korean and Simplified Chinese. It follows
 - **Presets**: store load orders under a name, per game (trucks, a coach, a car), and switch between them from the list above the load order. Applying a preset changes the profile only once you press `Save`.
 - **Copy and paste mods**: click rows of the load order (Ctrl or Shift for several), copy them, and paste the ones another preset or profile lacks into their own groups (Ctrl+C / Ctrl+V).
 - **Workshop info**: titles and previews of Workshop mods without a name are fetched from Steam's public API. Can be switched off in the settings.
+- **Updates**: at start the app asks GitHub whether a newer release is out and shows an **Update** button when there is one. Pressing it downloads the release, checks it against the release's SHA-256, replaces the program file and starts the app again; the `data` folder stays as it is. The check can be switched off in the settings, and nothing is installed without being asked.
 - **Sharing**: export and import load orders as files; also reads someone else's `profile.sii` and map combos. The file formats are those of the original app.
 - **Mod management**: details, favourites, delete to the recycle bin, show in folder.
 - **Remembered view**: the last game and profile, and the library's sort order and filters, come back on the next start.
 
-Not ported from the original: online share codes, auto-update, the German interface, Linux and macOS packaging.
+Not ported from the original: online share codes, the German interface, Linux and macOS packaging.
 
 ## Layout
 

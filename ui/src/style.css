@@ -93,6 +93,13 @@ input {
   font-weight: 600;
 }
 
+/* a newer version is out */
+.btn.update {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .btn.small {
   padding: 3px 8px;
   font-size: 12px;
@@ -131,6 +138,46 @@ input[type="search"] {
 .brand {
   font-weight: 700;
   letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.brand-version {
+  margin-left: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* a narrow window takes the room from the profile list, not from the
+   buttons */
+.topbar > * {
+  flex-shrink: 0;
+}
+
+.topbar > .field {
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.topbar > .field select {
+  min-width: 0;
+}
+
+.topbar > .field > span {
+  flex-shrink: 0;
+}
+
+.topbar > .spacer {
+  flex-shrink: 1;
+}
+
+/* the game version gives way before the profile list does */
+#game-version {
+  flex-shrink: 100;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .seg {
@@ -194,6 +241,11 @@ input[type="search"] {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
+}
+
+/* five buttons do not fit beside the title in a narrow window */
+.pane.order > .toolbar {
+  flex-wrap: wrap;
 }
 
 .pane-title {
@@ -612,6 +664,13 @@ input[type="search"] {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.form-inline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .form-check {

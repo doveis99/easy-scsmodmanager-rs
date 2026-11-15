@@ -17,6 +17,7 @@ export const ko = {
   "top.profile": "프로필",
   "top.backups": "백업",
   "top.settings": "설정",
+  "top.version": "이 프로그램의 버전",
   "top.rescan": "다시 스캔",
   "game.notFound": "설치를 찾지 못했습니다",
   "game.version": "게임 버전 {version}",
@@ -258,6 +259,14 @@ export const ko = {
   "settings.languageSystem": "시스템 언어 따르기",
   "settings.lookup": "창작마당 모드의 이름과 미리보기를 Steam에서 가져오기",
   "settings.lookupNote": "스캔 후 캐시에 없는 창작마당 ID만 Steam 공개 API로 보냅니다.",
+  "settings.updateCheck": "시작할 때 새 버전 확인",
+  "settings.updateNote":
+    "GitHub의 릴리스 정보를 한 번 읽어 옵니다. 보내는 정보는 없으며, 새 버전이 있어도 직접 누르기 전에는 설치하지 않습니다.",
+  "settings.version": "현재 버전 {version}",
+  "settings.checkNow": "지금 확인",
+  "settings.checking": "확인하는 중…",
+  "settings.upToDate": "최신 버전입니다.",
+  "settings.updateFound": "새 버전 {version}이(가) 있습니다. 설정을 닫고 위쪽의 '업데이트 {version}' 버튼을 누르세요.",
   "settings.keep": "프로필당 백업 보관 개수",
   "settings.keepNote": "0이면 모두 보관합니다. 백업 위치: {path}",
   "settings.keepInvalid": "백업 보관 개수는 0에서 1000 사이의 정수여야 합니다.",
@@ -275,6 +284,29 @@ export const ko = {
   "settings.savedDirty":
     "설정을 저장했습니다. 저장하지 않은 로드 순서가 있어 다시 스캔하지 않았습니다. '다시 스캔'을 누르면 반영됩니다.",
   "settings.savedNoInstall": "설정을 저장했습니다. ETS2 / ATS 데이터 폴더를 찾지 못했습니다.",
+
+  // ---- updates
+  "update.button": "업데이트 {version}",
+  "update.buttonTitle": "새 버전이 나왔습니다. 눌러서 확인하고 업데이트합니다.",
+  "update.title": "업데이트",
+  "update.available": "새 버전 {latest}이(가) 나왔습니다. 지금 쓰는 버전은 {current}입니다.",
+  "update.how":
+    "새 버전({size})을 GitHub에서 받아 프로그램 파일을 교체한 뒤 다시 시작합니다. 설정, 프리셋, 백업이 들어 있는 data 폴더는 그대로 둡니다.",
+  "update.dirty": "저장하지 않은 로드 순서 변경은 다시 시작하면서 사라집니다.",
+  "update.manual": "이 실행 파일은 스스로 교체할 수 없습니다. 다운로드 페이지에서 새 버전을 받으세요.",
+  "update.later": "나중에",
+  "update.notes": "릴리스 노트",
+  "update.install": "지금 업데이트",
+  "update.page": "다운로드 페이지 열기",
+  "update.downloading": "새 버전 {version}을(를) 받는 중입니다.",
+  "update.connecting": "연결하는 중…",
+  "update.progress": "{done} / {total}",
+  "update.cancelled": "업데이트를 취소했습니다.",
+  "update.restarting": "{version}(으)로 업데이트했습니다. 다시 시작합니다…",
+  "update.failed": "업데이트 실패: {error}",
+  "update.failedTitle": "업데이트 실패",
+  "update.failedBody":
+    "업데이트를 설치하지 못했습니다. 지금 쓰는 버전은 그대로입니다.\n\n{error}\n\n다운로드 페이지에서 새 버전을 직접 받을 수도 있습니다.",
 
   // ---- sharing
   "share.intro":
@@ -383,4 +415,12 @@ export const ko = {
   "err.preset_empty_name": "프리셋 이름을 입력하세요.",
   "err.preset_name_taken": "'{0}' 프리셋이 이미 있습니다. 덮어쓰려면 목록에서 '현재 목록으로 갱신'을 누르세요.",
   "err.preset_not_found": "'{0}' 프리셋을 찾을 수 없습니다.",
+  "err.update_check_failed": "새 버전을 확인하지 못했습니다: {0}",
+  "err.update_none": "설치할 새 버전이 없습니다.",
+  "err.update_no_package": "이 릴리스에는 자동으로 설치할 수 있는 파일이 없습니다.",
+  "err.update_busy": "이미 업데이트가 진행 중입니다.",
+  "err.update_download": "새 버전을 받지 못했습니다: {0}",
+  "err.update_cancelled": "업데이트를 취소했습니다.",
+  "err.update_bad_package": "받은 파일에서 프로그램을 찾지 못했습니다: {0}",
+  "err.update_write": "프로그램 파일을 교체하지 못했습니다. 프로그램이 있는 폴더에 쓸 수 있는지 확인하세요: {0}",
 };

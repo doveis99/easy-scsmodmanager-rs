@@ -34,6 +34,8 @@ use scsmm_core::share::{self, check_share, MapComboEntry, ShareCheck, ShareList}
 use scsmm_core::steam;
 use scsmm_core::workshop_api::{self, WorkshopCache};
 
+mod updater;
+
 type CmdResult<T> = Result<T, String>;
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -61,6 +63,7 @@ struct AppState {
     extract_cancel: AtomicBool,
     /// Folder of the last extraction - the only one the UI may ask to open.
     last_extract: Mutex<Option<PathBuf>>,
+    update: updater::UpdateState,
 }
 
 /// Per-game string sets / maps are keyed by the game's short name.
@@ -411,6 +414,8 @@ struct SettingsView {
     /// What auto-detection finds, shown as the hint for the manual fields.
     detected: HashMap<&'static str, DetectedPaths>,
     backup_root: String,
+    /// Version of the running app.
+    version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -651,6 +656,7 @@ fn get_settings(state: State<'_, AppState>) -> CmdResult<SettingsView> {
         settings,
         detected,
         backup_root: profile::default_backup_root().display().to_string(),
+        version: updater::CURRENT_VERSION,
     })
 }
 
@@ -1106,7 +1112,7 @@ fn free_folder(parent: &Path, name: &str) -> CmdResult<PathBuf> {
     Err(coded("no_folder_name", &[]))
 }
 
-/// Clears the busy flag however the extraction ends.
+/// Clears a busy flag however the work it guards ends.
 struct BusyGuard<'a>(&'a AtomicBool);
 
 impl Drop for BusyGuard<'_> {
@@ -1217,8 +1223,9 @@ fn open_workshop_page(game: String, id: String, state: State<'_, AppState>) -> C
     open_url(&workshop_url(&workshop_id.ok_or_else(|| coded("not_workshop", &[]))?))
 }
 
-/// Hand a URL to the default browser. Callers only pass workshop URLs
-/// built here from a validated numeric id.
+/// Hand a URL to the default browser. Callers only pass URLs built here:
+/// workshop pages from a validated numeric id, release pages from a
+/// version tag.
 fn open_url(url: &str) -> CmdResult<()> {
     #[cfg(windows)]
     std::process::Command::new("rundll32.exe")
@@ -1731,6 +1738,7 @@ fn open_workshop_item(workshop_id: String) -> CmdResult<()> {
 
 pub fn run() {
     enter_portable_mode();
+    updater::finish_previous_update();
     start_prewarm();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1774,6 +1782,11 @@ pub fn run() {
             export_map_combo,
             preview_map_combo,
             open_workshop_item,
+            updater::check_update,
+            updater::install_update,
+            updater::cancel_update,
+            updater::restart_app,
+            updater::open_release_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");

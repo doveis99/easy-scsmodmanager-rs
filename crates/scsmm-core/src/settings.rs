@@ -76,6 +76,8 @@ impl ViewSettings {
 pub struct Settings {
     /// Ask Steam for titles and previews of workshop mods after a scan.
     pub workshop_lookup: bool,
+    /// Ask GitHub at start whether a newer version of the app is out.
+    pub update_check: bool,
     /// How many backups to keep per profile; 0 keeps all of them.
     pub backup_keep: u32,
     /// Name fragments of mods that belong at the very top of the load
@@ -94,6 +96,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             workshop_lookup: true,
+            update_check: true,
             backup_keep: 10,
             map_base_names: DEFAULT_MAP_BASE_NAMES.iter().map(|s| s.to_string()).collect(),
             last_game: None,
@@ -216,7 +219,13 @@ mod tests {
     fn round_trip_and_forward_compatibility() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested").join("settings.json");
-        let mut s = Settings { workshop_lookup: false, backup_keep: 3, last_game: Some(Game::Ats), ..Settings::default() };
+        let mut s = Settings {
+            workshop_lookup: false,
+            update_check: false,
+            backup_keep: 3,
+            last_game: Some(Game::Ats),
+            ..Settings::default()
+        };
         s.ats.documents_dir = Some(PathBuf::from("X:/ats"));
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);
@@ -227,6 +236,7 @@ mod tests {
         let loaded = Settings::load(&path);
         assert_eq!(loaded.backup_keep, 2);
         assert!(loaded.workshop_lookup);
+        assert!(loaded.update_check);
         assert!(!loaded.map_base_names.is_empty());
     }
 

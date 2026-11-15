@@ -26,6 +26,7 @@ pub mod settings;
 pub mod share;
 pub mod sii;
 pub mod steam;
+pub mod update;
 pub mod workshop;
 pub mod workshop_api;
 

@@ -800,6 +800,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "trash",
+ "zip",
 ]
 
 [[package]]
@@ -2926,6 +2927,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "ureq",
