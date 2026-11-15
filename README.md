@@ -11,7 +11,7 @@ It is a rewrite of [Switch-Bros/easy-scsmodmanager](https://github.com/Switch-Br
 Get `Easy-SCS-Mod-Manager-<version>-portable.zip` from the [releases](https://github.com/doveis99/easy-scsmodmanager-rs/releases), unpack it anywhere and run `easy-scsmodmanager.exe`. Nothing is installed.
 
 - Windows 10/11 (64-bit) only.
-- Settings, category pins, favourites, profile backups and caches are kept in the `data` folder next to the executable.
+- Settings, category pins, favourites, presets, profile backups and caches are kept in the `data` folder next to the executable.
 - When started from a place it cannot write to (Program Files etc.), the app uses `%APPDATA%\easy-scsmodmanager-rs` instead.
 - The Microsoft Edge WebView2 runtime is required. Windows 11 ships with it.
 - The executable is not code-signed, so Windows SmartScreen may warn on the first start.
@@ -32,6 +32,8 @@ The interface is available in English, Korean and Simplified Chinese. It follows
 - **Locked archives**: archives that hide their file listing are marked `Hidden listing`. Their file names are recovered by matching against the path list of the game's own archives, and used for conflict detection and categories. The path list is cached in `data/cache/gamepaths` and rebuilt when the game changes.
 - **Extraction**: the `Extract…` button in a mod's details unpacks its `.scs` archive into a new folder. Packed HashFS v2 textures come out as `.dds`. For locked archives, names are recovered from the game's path list, from paths found inside the files and from naming conventions; whatever stays nameless is written to `_unnamed` as `<hash>.<extension>` (extension guessed from the content). The game's own archives can be unpacked with `scsmm extract` on the command line.
 - **Saving and backups**: every save backs up the whole profile folder first; backups can be restored.
+- **Presets**: store load orders under a name, per game (trucks, a coach, a car), and switch between them from the list above the load order. Applying a preset changes the profile only once you press `Save`.
+- **Copy and paste mods**: click rows of the load order (Ctrl or Shift for several), copy them, and paste the ones another preset or profile lacks into their own groups (Ctrl+C / Ctrl+V).
 - **Workshop info**: titles and previews of Workshop mods without a name are fetched from Steam's public API. Can be switched off in the settings.
 - **Sharing**: export and import load orders as files; also reads someone else's `profile.sii` and map combos. The file formats are those of the original app.
 - **Mod management**: details, favourites, delete to the recycle bin, show in folder.

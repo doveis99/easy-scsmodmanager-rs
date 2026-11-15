@@ -181,6 +181,13 @@ interface SortPlan {
 
 const NO_PLAN: SortPlan = { order: [], sorted: true, held: [], partners: {} };
 
+/** A named load order of the game, stored by the app. */
+interface Preset {
+  name: string;
+  /** Display order: the top of the load order first. */
+  mods: { name: string; display_name: string }[];
+}
+
 interface Constants {
   categories: string[];
   groups: string[];
@@ -215,6 +222,18 @@ const state = {
   layout: { rows: [], misplaced: 0 } as Layout,
   conflicts: { overrides: {}, frequent: {} } as ConflictReport,
   plan: NO_PLAN,
+  /** Presets of the current game. */
+  presets: [] as Preset[],
+  /** Name of the preset the list was last taken from or stored as, to
+   *  offer storing later edits back into it. */
+  basePreset: null as string | null,
+  /** Rows picked in the load order. Held by identity: a list that is
+   *  loaded anew starts without a selection, a reordered one keeps it. */
+  selection: new Set<ActiveItem>(),
+  /** Where a Shift+click range starts. */
+  anchor: null as ActiveItem | null,
+  /** Mods copied from a load order, to paste into another one. */
+  clipboard: null as { game: GameId; mods: Preset["mods"] } | null,
   filter: { q: "", category: "", source: "", sort: "name", favorites: false },
   settings: null as SettingsView | null,
   /** Bumped per load so a slow response for an old game/profile is dropped. */
@@ -258,19 +277,24 @@ async function loadGame(game: GameId) {
   state.layout = { rows: [], misplaced: 0 };
   state.conflicts = { overrides: {}, frequent: {} };
   state.plan = NO_PLAN;
+  state.presets = [];
+  state.basePreset = null;
   renderGameSwitch();
   renderProfileSelect();
   renderAll();
   setStatus(t("status.scanning"));
   const started = performance.now();
   try {
-    const [mods, profiles] = await Promise.all([
+    const [mods, profiles, presets] = await Promise.all([
       invoke<Mod[]>("scan_mods", { game }),
       invoke<Profile[]>("list_profiles", { game }),
+      // presets are an extra: without them the game still loads
+      invoke<Preset[]>("list_presets", { game }).catch(() => [] as Preset[]),
     ]);
     if (epoch !== state.epoch) return;
     state.mods = mods;
     state.profiles = profiles;
+    state.presets = presets;
     // default to the profile with the most active mods
     const usable = profiles.filter((p) => !p.error);
     const best = usable.reduce<Profile | null>(
@@ -345,6 +369,7 @@ async function loadProfile() {
     state.active = items;
   }
   state.saved = JSON.stringify(state.active);
+  state.basePreset = null;
   await relayout();
 }
 
@@ -727,6 +752,11 @@ function renderOrder() {
   $<HTMLButtonElement>("auto-sort").disabled = state.plan.sorted;
   $<HTMLButtonElement>("revert").disabled = !dirty;
   $<HTMLButtonElement>("save").disabled = !dirty || !state.profilePath;
+  renderPresetSelect();
+  // rows that left the list are no longer picked
+  const listed = new Set(state.active);
+  for (const item of state.selection) if (!listed.has(item)) state.selection.delete(item);
+  renderCopyPaste();
 
   // where a drop on each row lands: a header inserts before the next mod
   let nextIndex = state.active.length;
@@ -772,7 +802,9 @@ function orderRow(row: Extract<Row, { kind: "mod" }>, item: ActiveItem): HTMLEle
       class:
         "row mod" +
         (row.misplaced && !state.plan.held.includes(item.name) ? " misplaced" : "") +
-        (item.installed ? "" : " missing"),
+        (item.installed ? "" : " missing") +
+        (state.selection.has(item) ? " selected" : ""),
+      "aria-selected": String(state.selection.has(item)),
       tabindex: "0",
       "data-index": String(row.index),
     },
@@ -828,6 +860,117 @@ async function moveActive(from: number, insertAt: number) {
   await relayout();
 }
 
+// ------------------------------------------------- selecting and copying
+
+/** Show the selection on the rows as they are, without redrawing them (a
+ *  redraw would take the focus the keyboard shortcuts rely on). */
+function paintSelection() {
+  for (const row of $("rows").querySelectorAll<HTMLElement>(".row.mod")) {
+    const picked = state.selection.has(state.active[Number(row.dataset.index)]);
+    row.classList.toggle("selected", picked);
+    row.setAttribute("aria-selected", String(picked));
+  }
+  renderCopyPaste();
+}
+
+/** A click on a row: alone it picks just that row (or lets go of it),
+ *  with Ctrl it adds or removes the row, with Shift it picks the range
+ *  from the row picked before. */
+function selectRow(index: number, keys: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) {
+  const item = state.active[index];
+  if (!item) return;
+  const picked = state.selection;
+  const add = keys.ctrlKey || keys.metaKey;
+  const from = state.anchor ? state.active.indexOf(state.anchor) : -1;
+  if (keys.shiftKey && from >= 0) {
+    if (!add) picked.clear();
+    for (let i = Math.min(from, index); i <= Math.max(from, index); i++) picked.add(state.active[i]);
+  } else {
+    if (add) {
+      if (!picked.delete(item)) picked.add(item);
+    } else {
+      const wasOnly = picked.size === 1 && picked.has(item);
+      picked.clear();
+      if (!wasOnly) picked.add(item);
+    }
+    state.anchor = item;
+  }
+  paintSelection();
+}
+
+function clearSelection() {
+  if (state.selection.size === 0) return;
+  state.selection.clear();
+  paintSelection();
+}
+
+function renderCopyPaste() {
+  const picked = state.selection.size;
+  const copy = $<HTMLButtonElement>("copy-mods");
+  copy.textContent = picked ? t("copy.selection", { n: picked }) : t("copy.whole");
+  copy.disabled = state.active.length === 0;
+  const held = state.clipboard?.game === state.game ? state.clipboard.mods.length : 0;
+  const paste = $<HTMLButtonElement>("paste-mods");
+  paste.textContent = held ? t("paste.button", { n: held }) : t("paste.empty");
+  paste.disabled = held === 0;
+}
+
+/** Copy the picked mods - the whole list when none is picked - to paste
+ *  them into another preset or profile of the same game. */
+function copyMods() {
+  const picked = state.active.filter((a) => state.selection.has(a));
+  const items = picked.length ? picked : state.active;
+  if (items.length === 0) return;
+  state.clipboard = { game: state.game, mods: activeEntries(items) };
+  renderCopyPaste();
+  setStatus(t("copy.done", { n: items.length }), "ok");
+}
+
+/** Position of a load-order group, top first, for a row's token. */
+function groupIndexOf(token: string): number {
+  const { groups, category_groups } = state.constants;
+  // the token of a pinned-to-top mod is the id of its group
+  const at = groups.indexOf(category_groups[token] ?? token);
+  return at >= 0 ? at : groups.indexOf("ui_other");
+}
+
+/** Add the copied mods that the list does not have yet, each at the top
+ *  of its own group. Mods already in the list stay where they are. */
+async function pasteMods() {
+  const clip = state.clipboard;
+  if (!clip || clip.game !== state.game) return;
+  const have = activeNames();
+  const wanted = clip.mods.filter((m) => !have.has(m.name));
+  if (wanted.length === 0) {
+    setStatus(t("paste.nothing", { n: clip.mods.length }));
+    return;
+  }
+  const epoch = state.epoch;
+  try {
+    const resolved = await invoke<ActiveItem[]>("resolve_items", { game: state.game, items: wanted });
+    if (epoch !== state.epoch) return;
+    const now = activeNames();
+    const items = resolved.filter((i) => !now.has(i.name));
+    // bottom-most first, so mods of one group keep the order they had
+    for (const item of [...items].reverse()) {
+      const group = groupIndexOf(item.token);
+      const at = state.active.findIndex((a) => groupIndexOf(a.token) >= group);
+      state.active.splice(at < 0 ? state.active.length : at, 0, item);
+    }
+    // show what arrived
+    state.selection = new Set(items);
+    state.anchor = null;
+    await relayout();
+    const skipped = clip.mods.length - items.length;
+    setStatus(
+      t("paste.done", { n: items.length }) + (skipped ? t("paste.skipped", { n: skipped }) : "") + t("sort.saveNote"),
+      "ok",
+    );
+  } catch (e) {
+    setStatus(errorText(e), "error");
+  }
+}
+
 /** Badge for a mod that sits outside its group: a warning when it could
  *  simply move there, a neutral note when a mod it shares files with holds
  *  it where it is (a patch above what it patches). */
@@ -865,6 +1008,7 @@ async function autoSort() {
 
 async function revert() {
   state.active = JSON.parse(state.saved) as ActiveItem[];
+  state.basePreset = null;
   await relayout();
   setStatus(t("status.reverted"));
 }
@@ -1148,12 +1292,45 @@ function setupReordering() {
     const { from, active } = drag;
     const row = active ? rowAt(ev.clientX, ev.clientY) : null;
     finish();
-    if (row?.dataset.insertAt !== undefined) void moveActive(from, Number(row.dataset.insertAt));
+    // a press that never became a drag is a click: it selects
+    if (!active) selectRow(from, ev);
+    else if (row?.dataset.insertAt !== undefined) void moveActive(from, Number(row.dataset.insertAt));
   });
 
   rowsEl.addEventListener("pointercancel", finish);
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape" && drag) finish();
+  });
+
+  // keyboard: Space picks the focused row, Ctrl+A all of them, Escape none
+  rowsEl.addEventListener("keydown", (ev) => {
+    if (ev.altKey || (ev.target as HTMLElement).closest("button")) return;
+    const row = (ev.target as HTMLElement).closest<HTMLElement>(".row.mod");
+    if (ev.key === " " && row?.dataset.index !== undefined) {
+      ev.preventDefault();
+      selectRow(Number(row.dataset.index), { ctrlKey: true, metaKey: false, shiftKey: ev.shiftKey });
+    } else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "a") {
+      ev.preventDefault();
+      state.selection = new Set(state.active);
+      paintSelection();
+    } else if (ev.key === "Escape" && !drag) {
+      clearSelection();
+    }
+  });
+
+  // keyboard: Ctrl+C / Ctrl+V copy and paste mods while the load order
+  // (or nothing at all) has the focus; text fields keep their own
+  document.addEventListener("keydown", (ev) => {
+    if (!(ev.ctrlKey || ev.metaKey) || ev.altKey || ev.shiftKey) return;
+    const key = ev.key.toLowerCase();
+    if (key !== "c" && key !== "v") return;
+    const focus = document.activeElement;
+    const here = !focus || focus === document.body || !!focus.closest(".pane.order");
+    if (!here || !$("modal").hidden || focus instanceof HTMLInputElement || focus instanceof HTMLTextAreaElement) return;
+    if (key === "c" && window.getSelection()?.toString()) return; // text is being copied
+    ev.preventDefault();
+    if (key === "c") copyMods();
+    else void pasteMods();
   });
 
   // keyboard: Alt+Up / Alt+Down moves the focused row by one place
@@ -1806,6 +1983,7 @@ async function importShareFrom(path: string) {
       game: state.game,
       items: picked.map(({ name, display_name }) => ({ name, display_name })),
     });
+    state.basePreset = null;
     await relayout();
     setStatus(t("share.imported", { n: picked.length }), "ok");
   } catch (e) {
@@ -1849,6 +2027,286 @@ async function importMapComboFrom(path: string) {
         preview.outdated.map((o) => t("combo.outdatedLine", { name: o.name, local: o.local, combo: o.combo })).join("\n"),
     );
   }
+}
+
+// -------------------------------------------------------------- presets
+
+/** Value of the option that opens the presets dialog; preset options carry
+ *  their index, so no name can collide with it. */
+const PRESET_MANAGE = "manage";
+/** Value of the option that stores the edited list back into its preset. */
+const PRESET_UPDATE = "update";
+
+/** What makes two lists the same load order: the mods and their order. */
+const listKey = (items: { name: string }[]) => items.map((i) => i.name).join("\n");
+
+/** The preset the edited list is equal to, if any. */
+function matchingPreset(): Preset | undefined {
+  const key = listKey(state.active);
+  return state.presets.find((p) => listKey(p.mods) === key);
+}
+
+/** The preset the list came from and has been edited away from, if any. */
+function editedPreset(): Preset | undefined {
+  if (matchingPreset()) return undefined;
+  return state.presets.find((p) => p.name === state.basePreset);
+}
+
+/** The switcher above the load order: shows the preset the list equals
+ *  (or was edited away from), and applies the one that is picked. */
+function renderPresetSelect() {
+  const select = $<HTMLSelectElement>("preset-select");
+  const current = matchingPreset();
+  const edited = editedPreset();
+  select.replaceChildren(
+    // only ever shown as the closed control's text, never offered
+    h(
+      "option",
+      { value: "", hidden: true, selected: !current },
+      edited ? t("preset.edited", { name: edited.name }) : t("preset.pick"),
+    ),
+    ...state.presets.map((p, i) =>
+      h("option", { value: String(i), selected: p === current }, t("preset.option", { name: p.name, n: p.mods.length })),
+    ),
+    ...(edited ? [h("option", { value: PRESET_UPDATE }, t("preset.updateNamed", { name: edited.name }))] : []),
+    h("option", { value: PRESET_MANAGE }, t("preset.manage")),
+  );
+  select.disabled = state.installs.length === 0;
+}
+
+/** Store the edited list back into the preset it came from. */
+async function updateEditedPreset() {
+  const preset = editedPreset();
+  if (!preset) return;
+  const game = state.game;
+  const ok = await confirmModal(
+    t("preset.updateTitle"),
+    t("preset.updateBody", { name: preset.name, n: state.active.length, old: preset.mods.length }),
+    t("preset.updateOk"),
+  );
+  if (!ok || game !== state.game) return;
+  try {
+    state.presets = await invoke<Preset[]>("save_preset", {
+      game,
+      name: preset.name,
+      items: activeEntries(),
+      overwrite: true,
+    });
+    renderPresetSelect();
+    setStatus(
+      t("preset.saved", { name: preset.name, n: state.active.length }) + (isDirty() ? t("preset.saveNote") : ""),
+      "ok",
+    );
+  } catch (e) {
+    setStatus(errorText(e), "error");
+  }
+}
+
+/** Replace the edited list with the preset's. Nothing is written until
+ *  Save, like every other change to the list. */
+async function applyPreset(preset: Preset) {
+  // edits that are neither saved nor kept in a preset would be gone
+  if (isDirty() && !matchingPreset() && !(await confirmDiscard())) return;
+  const epoch = state.epoch;
+  try {
+    const items = await invoke<ActiveItem[]>("resolve_items", { game: state.game, items: preset.mods });
+    if (epoch !== state.epoch) return;
+    state.active = items;
+    state.basePreset = preset.name;
+    await relayout();
+    const missing = items.filter((i) => !i.installed).length;
+    setStatus(
+      t("preset.applied", { name: preset.name, n: items.length }) +
+        (missing ? t("preset.appliedMissing", { n: missing }) : "") +
+        (isDirty() ? t("preset.saveNote") : t("preset.sameAsProfile")),
+      missing ? "info" : "ok",
+    );
+  } catch (e) {
+    setStatus(errorText(e), "error");
+  }
+}
+
+/** A button that asks for a second click before it acts. */
+function armedButton(label: string, confirmLabel: string, action: () => void): HTMLButtonElement {
+  const button = h("button", { class: "btn small" }, label);
+  button.addEventListener("click", () => {
+    if (button.dataset.armed === "1") return action();
+    button.dataset.armed = "1";
+    button.textContent = confirmLabel;
+    button.classList.add("danger");
+  });
+  return button;
+}
+
+/** Store the current list as a preset, and update, rename, delete or apply
+ *  the stored ones. */
+async function openPresets() {
+  const game = state.game;
+  const list = h("div", { class: "preset-list" });
+  const error = h("div", { class: "form-error", role: "alert" });
+  const nameInput = h("input", {
+    type: "text",
+    maxlength: "60",
+    placeholder: t("preset.namePlaceholder"),
+    "aria-label": t("preset.name"),
+  });
+  let chosen: Preset | null = null;
+
+  /** Run a command that changes the presets and returns the new list. */
+  let busy = false;
+  const change = async (command: string, args: Record<string, unknown>): Promise<boolean> => {
+    // one at a time: a second Enter or click must not race the first
+    if (busy) return false;
+    busy = true;
+    error.textContent = "";
+    try {
+      state.presets = await invoke<Preset[]>(command, { game, ...args });
+      renderPresetSelect();
+      await refresh();
+      return true;
+    } catch (e) {
+      error.textContent = errorText(e);
+      return false;
+    } finally {
+      busy = false;
+    }
+  };
+  /** Enter that only ends an input method's composition (Hangul, pinyin)
+   *  is not yet the Enter that confirms. */
+  const confirms = (ev: KeyboardEvent) => ev.key === "Enter" && !ev.isComposing && ev.keyCode !== 229;
+
+  const presetRow = (p: Preset, missing: number): HTMLElement => {
+    const isCurrent = listKey(p.mods) === listKey(state.active);
+    const name = h("span", { class: "preset-name", title: p.name }, p.name);
+    const rename = () => {
+      const input = h("input", { class: "preset-name", type: "text", maxlength: "60", "aria-label": t("preset.name") });
+      input.value = p.name;
+      let settled = false;
+      const back = () => {
+        settled = true;
+        input.replaceWith(name);
+      };
+      const commit = async () => {
+        if (settled) return;
+        settled = true;
+        const newName = input.value.trim();
+        const wasBase = state.basePreset === p.name;
+        if (!newName || newName === p.name || !(await change("rename_preset", { name: p.name, newName }))) {
+          input.replaceWith(name);
+        } else if (wasBase) {
+          state.basePreset = newName;
+          renderPresetSelect();
+        }
+      };
+      input.addEventListener("keydown", (ev) => {
+        if (confirms(ev)) void commit();
+        else if (ev.key === "Escape") {
+          // Escape leaves the name field, not the dialog
+          ev.stopPropagation();
+          back();
+        }
+      });
+      input.addEventListener("blur", () => void commit());
+      name.replaceWith(input);
+      input.focus();
+      input.select();
+    };
+    const update = armedButton(t("preset.update"), t("preset.reallyUpdate"), () => {
+      void change("save_preset", { name: p.name, items: activeEntries(), overwrite: true }).then((ok) => {
+        if (!ok) return;
+        state.basePreset = p.name;
+        setStatus(t("preset.saved", { name: p.name, n: state.active.length }), "ok");
+      });
+    });
+    update.disabled = isCurrent;
+    return h(
+      "div",
+      { class: "preset-row" },
+      name,
+      isCurrent ? h("span", { class: "badge cat", title: t("preset.currentTitle") }, t("preset.current")) : null,
+      h(
+        "span",
+        { class: "muted" },
+        t("preset.count", { n: p.mods.length }) + (missing ? t("preset.missing", { n: missing }) : ""),
+      ),
+      h(
+        "button",
+        {
+          class: "btn small primary",
+          disabled: isCurrent,
+          onclick: () => {
+            chosen = p;
+            dismissDialog();
+          },
+        },
+        t("common.apply"),
+      ),
+      update,
+      h("button", { class: "btn small", onclick: rename }, t("preset.rename")),
+      armedButton(t("common.delete"), t("backup.reallyDelete"), () => void change("delete_preset", { name: p.name })),
+    );
+  };
+
+  const refresh = async () => {
+    const presets = state.presets;
+    // how much of each preset is not installed (any more)
+    const missing = await Promise.all(
+      presets.map((p) =>
+        invoke<ActiveItem[]>("resolve_items", { game, items: p.mods })
+          .then((items) => items.filter((i) => !i.installed).length)
+          .catch(() => 0),
+      ),
+    );
+    list.replaceChildren(
+      ...(presets.length
+        ? presets.map((p, i) => presetRow(p, missing[i]))
+        : [h("div", { class: "empty" }, t("preset.empty"))]),
+    );
+  };
+
+  const saveNew = async () => {
+    const name = nameInput.value.trim();
+    if (!name) {
+      error.textContent = t("err.preset_empty_name");
+      nameInput.focus();
+      return;
+    }
+    if (await change("save_preset", { name, items: activeEntries(), overwrite: false })) {
+      nameInput.value = "";
+      state.basePreset = name;
+      setStatus(t("preset.saved", { name, n: state.active.length }), "ok");
+    }
+  };
+  nameInput.addEventListener("keydown", (ev) => {
+    if (confirms(ev)) void saveNew();
+  });
+
+  await refresh();
+  const opened = openDialog<void>({
+    title: t("preset.title", { game: game.toUpperCase() }),
+    body: h(
+      "div",
+      { class: "form" },
+      h("div", {}, t("preset.intro")),
+      h("div", { class: "form-note" }, t("preset.note")),
+      h(
+        "div",
+        { class: "preset-new" },
+        nameInput,
+        h("button", { class: "btn primary", onclick: () => void saveNew() }, t("preset.saveCurrent", { n: state.active.length })),
+      ),
+      list,
+      error,
+    ),
+    wide: true,
+    dismiss: undefined,
+    buttons: [{ label: t("common.close"), value: undefined }],
+  });
+  // with nothing stored yet, the name is the next thing to type
+  if (state.presets.length === 0) nameInput.focus();
+  await opened;
+  const picked = chosen as Preset | null;
+  if (picked) await applyPreset(picked);
 }
 
 type ShareAction = "close" | "export" | "import" | "combo-export" | "combo-import";
@@ -1902,7 +2360,7 @@ async function openShareMenu() {
 // The same entry points without the native file picker, so automated UI
 // checks can drive the flows with a path of their own.
 Object.assign(window, {
-  __scsmm: { exportShareTo, importShareFrom, exportMapComboTo, importMapComboFrom, extractModTo },
+  __scsmm: { exportShareTo, importShareFrom, exportMapComboTo, importMapComboFrom, extractModTo, openPresets },
 });
 
 // ----------------------------------------------------------------- boot
@@ -1957,6 +2415,16 @@ function bindControls() {
   $("open-settings").addEventListener("click", () => void openSettings());
   $("open-backups").addEventListener("click", () => void openBackups());
   $("open-share").addEventListener("click", () => void openShareMenu());
+  $("copy-mods").addEventListener("click", () => copyMods());
+  $("paste-mods").addEventListener("click", () => void pasteMods());
+  $<HTMLSelectElement>("preset-select").addEventListener("change", (ev) => {
+    const value = (ev.target as HTMLSelectElement).value;
+    // show what the list is until the choice has actually been applied
+    renderPresetSelect();
+    if (value === PRESET_MANAGE) void openPresets();
+    else if (value === PRESET_UPDATE) void updateEditedPreset();
+    else if (state.presets[Number(value)]) void applyPreset(state.presets[Number(value)]);
+  });
 
   $<HTMLSelectElement>("profile-select").addEventListener("change", async (ev) => {
     const select = ev.target as HTMLSelectElement;

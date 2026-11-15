@@ -17,6 +17,7 @@ pub mod gamepaths;
 pub mod identity;
 pub mod load_order;
 pub mod manifest;
+pub mod presets;
 pub mod profile;
 pub mod recover;
 pub mod scanner;

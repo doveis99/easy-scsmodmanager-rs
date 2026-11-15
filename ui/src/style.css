@@ -429,6 +429,11 @@ input[type="search"] {
   background: var(--panel-2);
 }
 
+.row.mod.selected,
+.row.mod.selected:hover {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
 .row.mod.dragging {
   opacity: 0.4;
 }
@@ -723,6 +728,71 @@ input[type="search"] {
 .backup-time {
   flex: 1;
   font-variant-numeric: tabular-nums;
+}
+
+.presetbar {
+  padding-top: 0;
+}
+
+.presetbar .field {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#preset-select {
+  max-width: 220px;
+  padding: 4px 8px;
+  color: var(--text);
+  text-overflow: ellipsis;
+}
+
+.presetbar .btn {
+  white-space: nowrap;
+}
+
+.preset-new {
+  display: flex;
+  gap: 8px;
+}
+
+.preset-new input {
+  flex: 1;
+  min-width: 0;
+}
+
+.preset-list {
+  max-height: 44vh;
+  overflow: auto;
+}
+
+.preset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.preset-row .preset-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-row input.preset-name {
+  padding: 3px 6px;
+}
+
+.preset-row .muted {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.preset-list .empty {
+  padding: 24px 0;
 }
 
 .share-list {

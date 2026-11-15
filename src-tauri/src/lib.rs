@@ -23,6 +23,7 @@ use scsmm_core::game::{self, Game, GameInstall};
 use scsmm_core::identity::{workshop_url, ActiveModMatcher};
 use scsmm_core::load_order::{self, Row, GROUPS, MAP_BASE};
 use scsmm_core::manifest::sniff_image_mime;
+use scsmm_core::presets::{default_presets_path, Preset, PresetError, PresetStore};
 use scsmm_core::profile::{self, ActiveMod};
 use scsmm_core::scanner::{self, ScannedMod};
 use scsmm_core::extract::{extract_scs_with, ExtractOptions, ExtractResult};
@@ -80,6 +81,8 @@ struct Inner {
     favorites: Option<PerGame<BTreeSet<String>>>,
     /// Steam Workshop titles and previews. Loaded lazily from disk.
     workshop: Option<WorkshopCache>,
+    /// Named load orders per game. Loaded lazily from disk.
+    presets: Option<PresetStore>,
     /// Loaded lazily from disk.
     settings: Option<Settings>,
 }
@@ -222,6 +225,21 @@ fn load_overrides(path: &Path) -> PerGame<HashMap<String, Vec<String>>> {
         .collect()
 }
 
+/// The stored presets. A file whose content is not presets is moved aside
+/// and an empty store takes its place. One that could not be read at all,
+/// or could not be moved, is left alone and reported: an empty store would
+/// replace it at the next save.
+fn load_presets(path: &Path) -> CmdResult<PresetStore> {
+    match PresetStore::load(path) {
+        Ok(store) => Ok(store),
+        Err(scsmm_core::Error::Format(_)) => {
+            fs::rename(path, path.with_extension("unreadable.json")).map_err(|_| coded("presets_unreadable", &[]))?;
+            Ok(PresetStore::default())
+        }
+        Err(_) => Err(coded("presets_unreadable", &[])),
+    }
+}
+
 fn save_json<T: Serialize>(path: &Path, value: &T) -> CmdResult<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(err)?;
@@ -248,6 +266,14 @@ impl Inner {
     fn favorites(&mut self) -> &mut PerGame<BTreeSet<String>> {
         self.favorites
             .get_or_insert_with(|| load_json(&favorites_path()))
+    }
+
+    fn presets(&mut self) -> CmdResult<&mut PresetStore> {
+        let store = match self.presets.take() {
+            Some(store) => store,
+            None => load_presets(&default_presets_path())?,
+        };
+        Ok(self.presets.insert(store))
     }
 
     /// The categories the user pinned the mod to; empty when automatic.
@@ -456,6 +482,7 @@ fn build_dtos(inner: &mut Inner, game: Game) -> Vec<ModDto> {
         favorites,
         workshop,
         settings,
+        presets: _,
     } = &*inner;
     let (Some(mods), Some(workshop), Some(settings)) = (scans.get(&game), workshop.as_ref(), settings.as_ref())
     else {
@@ -1375,6 +1402,74 @@ fn save_load_order(
 }
 
 // ------------------------------------------------------------------- //
+// commands: presets
+// ------------------------------------------------------------------- //
+
+fn preset_err(e: PresetError, name: &str) -> String {
+    match e {
+        PresetError::EmptyName => coded("preset_empty_name", &[]),
+        PresetError::NameTaken => coded("preset_name_taken", &[name]),
+        PresetError::NotFound => coded("preset_not_found", &[name]),
+    }
+}
+
+/// Apply `change` to the presets and write them to disk; what is kept in
+/// memory only changes once the file did. Returns the game's presets.
+fn change_presets(
+    state: &State<'_, AppState>,
+    game: Game,
+    change: impl FnOnce(&mut PresetStore) -> CmdResult<()>,
+) -> CmdResult<Vec<Preset>> {
+    let mut inner = lock(state)?;
+    let mut next = inner.presets()?.clone();
+    change(&mut next)?;
+    next.save(&default_presets_path()).map_err(err)?;
+    let list = next.list(game).to_vec();
+    inner.presets = Some(next);
+    Ok(list)
+}
+
+/// The game's presets; each holds its mods in display order.
+#[tauri::command]
+fn list_presets(game: String, state: State<'_, AppState>) -> CmdResult<Vec<Preset>> {
+    let game = parse_game(&game)?;
+    Ok(lock(&state)?.presets()?.list(game).to_vec())
+}
+
+/// Store the list (display order) as a preset. A preset of that name is
+/// only replaced when `overwrite` is set. Profiles are not touched.
+#[tauri::command]
+fn save_preset(
+    game: String,
+    name: String,
+    items: Vec<ActiveMod>,
+    overwrite: bool,
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<Preset>> {
+    let game = parse_game(&game)?;
+    change_presets(&state, game, |presets| {
+        presets.put(game, &name, items, overwrite).map(drop).map_err(|e| preset_err(e, name.trim()))
+    })
+}
+
+#[tauri::command]
+fn rename_preset(game: String, name: String, new_name: String, state: State<'_, AppState>) -> CmdResult<Vec<Preset>> {
+    let game = parse_game(&game)?;
+    change_presets(&state, game, |presets| {
+        presets.rename(game, &name, &new_name).map(drop).map_err(|e| match e {
+            PresetError::NotFound => preset_err(e, &name),
+            _ => preset_err(e, new_name.trim()),
+        })
+    })
+}
+
+#[tauri::command]
+fn delete_preset(game: String, name: String, state: State<'_, AppState>) -> CmdResult<Vec<Preset>> {
+    let game = parse_game(&game)?;
+    change_presets(&state, game, |presets| presets.remove(game, &name).map_err(|e| preset_err(e, &name)))
+}
+
+// ------------------------------------------------------------------- //
 // commands: backups
 // ------------------------------------------------------------------- //
 
@@ -1667,6 +1762,10 @@ pub fn run() {
             layout_rows,
             sort_plan,
             save_load_order,
+            list_presets,
+            save_preset,
+            rename_preset,
+            delete_preset,
             list_backups,
             restore_backup,
             delete_backup,
@@ -1726,6 +1825,40 @@ mod tests {
         save_json(&path, &pins).unwrap();
         assert_eq!(load_overrides(&path), pins);
         assert!(load_overrides(&tmp.path().join("missing.json")).is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_presets_file_is_set_aside_not_lost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("presets.json");
+        assert_eq!(load_presets(&path).unwrap(), PresetStore::default());
+        assert!(!tmp.path().join("presets.unreadable.json").exists());
+
+        fs::write(&path, b"{ broken").unwrap();
+        assert_eq!(load_presets(&path).unwrap(), PresetStore::default());
+        assert!(!path.exists());
+        assert_eq!(fs::read(tmp.path().join("presets.unreadable.json")).unwrap(), b"{ broken");
+
+        // something that cannot be read at all is reported and left alone
+        fs::create_dir(&path).unwrap();
+        assert_eq!(load_presets(&path).unwrap_err(), "@presets_unreadable");
+        assert!(path.is_dir());
+        fs::remove_dir(&path).unwrap();
+
+        // a good file is read and left where it is
+        let mut store = PresetStore::default();
+        let mods = vec![ActiveMod { name: "a".into(), display_name: "A".into() }];
+        store.put(Game::Ets2, "Trucks", mods, false).unwrap();
+        store.save(&path).unwrap();
+        assert_eq!(load_presets(&path).unwrap().list(Game::Ets2), store.list(Game::Ets2));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn preset_errors_name_the_preset() {
+        assert_eq!(preset_err(PresetError::EmptyName, "x"), "@preset_empty_name");
+        assert_eq!(preset_err(PresetError::NameTaken, "Trucks"), "@preset_name_taken	Trucks");
+        assert_eq!(preset_err(PresetError::NotFound, "Coach"), "@preset_not_found	Coach");
     }
 
     #[test]
