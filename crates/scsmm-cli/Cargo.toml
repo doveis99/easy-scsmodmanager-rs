@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-scsmm-core = { version = "0.2.0", path = "../scsmm-core" }
+scsmm-core = { version = "0.3.0", path = "../scsmm-core" }
 
 [[bin]]
 name = "scsmm"
